@@ -1,7 +1,10 @@
-"""Shared helpers: env, logging, paths, BigQuery client."""
+"""Shared helpers: env, logging, paths, BigQuery client, raw JSON."""
+import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -50,3 +53,25 @@ def get_bq_client():
 
     project = os.getenv("GCP_PROJECT_ID")
     return bigquery.Client(project=project) if project else bigquery.Client()
+
+
+def new_run_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def raw_run_dir(run_id: str) -> Path:
+    """data/raw/{run_id}/ for one fetch pass."""
+    path = DATA_RAW_DIR / run_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_json(path: Path, default: Any = None) -> Any:
+    if not path.exists():
+        return {} if default is None else default
+    return json.loads(path.read_text(encoding="utf-8"))

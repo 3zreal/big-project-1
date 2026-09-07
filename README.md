@@ -16,10 +16,13 @@ youtube-data-pipeline/
 │   └── channel_overrides.csv     # @handles → channels.list(forHandle=)
 ├── etl/
 │   ├── __init__.py
-│   ├── fetch.py        # YouTube Data API v3 → data/raw/
+│   ├── fetch.py        # slice: N=20 videos/channel, 1 playlist page, comments 1 page
+│   ├── quota.py        # units_spent theo ngày Pacific
+│   ├── errors.py       # redact HttpError; quotaExceeded trước commentsDisabled
+│   ├── youtube_api.py  # channels/playlist/videos/commentThreads list (1 unit)
 │   ├── transform.py    # làm sạch / chuẩn hóa → data/processed/
 │   ├── load.py         # nạp lên BigQuery
-│   └── utils.py        # env, logging, BigQuery client
+│   └── utils.py        # env, logging, BigQuery client, data/raw/{run_id}
 ├── data/
 │   ├── raw/            # response thô (không commit)
 │   └── processed/      # không commit (gồm artists_registry.csv)
@@ -63,6 +66,25 @@ Ghi `data/processed/artists_registry.csv` (gitignore `*.csv`, không push). Pipe
 Freeze **fail** nếu không đủ 100 `channel_id` dạng `UC…` unique. Bổ sung `@handle` công khai vào `scripts/channel_overrides.csv` rồi chạy lại resolver (script gọi `channels.list(forHandle=)` — chạy được trên VM, không scrape YouTube search).
 
 Chạy lại Billboard freeze **giữ** `channel_id` đã resolve nếu `artist_name` không đổi.
+
+## Quota một lần chạy (Phase 2)
+
+Mỗi method list ở trên = **1 unit**. Trần mặc định 10.000 unit/ngày, reset nửa đêm **Pacific**. Không dùng `search.list`.
+
+| Slice | Units (100 kênh, typical) |
+|---|---|
+| `channels.list` 50+50 | ~2 |
+| `playlistItems.list` 1 page/kênh | ~100 |
+| `videos.list` batch 50 (≤20 video/kênh) | ~40 |
+| **Trước comments** | **~142** |
+| Comments steady-state (chỉ video mới hơn watermark, 1 page) | ~0–30 |
+| Comments **bootstrap** (last 5 published/kênh, không 20×100) | **≤ ~500** |
+| Một run steady-state | ~200–350 |
+| Một run bootstrap (comments lần đầu) | ~150 + ≤500 |
+
+Hard stop khi remaining Pacific < 1 unit cho call tiếp theo. Raw JSON: `data/raw/{run_id}/`. `uploads_playlist_id` cache: `data/processed/uploads_playlists.json` (gitignore).
+
+`main.py` chưa nối fetch slice này (phase 4).
 
 ## Chạy local
 
