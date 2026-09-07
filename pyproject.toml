@@ -1,0 +1,16 @@
+[project]
+name = "big-project-1"
+version = "0.1.0"
+description = "YouTube data pipeline: YouTube Data API v3 → Python → BigQuery"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "requests",
+    "python-dotenv",
+    "google-api-python-client",
+    "google-cloud-bigquery",
+    "pandas-gbq",
+    "pyarrow",
+    "google-auth",
+]

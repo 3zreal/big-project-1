@@ -1,0 +1,40 @@
+# Virtual environments
+.venv/
+venv/
+myenv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets — never commit
+.env
+key.json
+*.json.key
+service-account*.json
+storage.json
+credentials.json
+*-credentials.json
+
+# Large / generated data
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+*.csv
+*.parquet
+*.jsonl
+
+# Runtime logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
