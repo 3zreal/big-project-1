@@ -248,13 +248,17 @@ def _videos_frame(items: list[dict]) -> pd.DataFrame:
         snippet = item.get("snippet") or {}
         stats = item.get("statistics") or {}
         details = item.get("contentDetails") or {}
+        tags = snippet.get("tags") or []
         rows.append(
             {
                 "video_id": item["id"],
                 "channel_id": snippet.get("channelId", ""),
                 "title": snippet.get("title", ""),
+                "description": snippet.get("description", ""),
                 "published_at": snippet.get("publishedAt", ""),
                 "duration": details.get("duration", ""),
+                "tags": "|".join(str(t) for t in tags),
+                "category_id": str(snippet.get("categoryId") or ""),
                 "view_count": int(stats.get("viewCount") or 0),
                 "like_count": int(stats.get("likeCount") or 0),
                 "comment_count": int(stats.get("commentCount") or 0),
@@ -274,10 +278,13 @@ def select_comment_targets(
         return []
     targets: list[str] = []
     for channel_id, group in videos.groupby("channel_id", sort=False):
-        ordered = group.sort_values("published_at", ascending=False)
+        ordered = group.copy()
+        ordered["_pub"] = pd.to_datetime(ordered["published_at"], utc=True, errors="coerce")
+        ordered = ordered.sort_values("_pub", ascending=False)
         mark = (watermark or {}).get(str(channel_id))
         if mark:
-            newer = ordered[ordered["published_at"] > mark]
+            mark_ts = pd.to_datetime(mark, utc=True, errors="coerce")
+            newer = ordered[ordered["_pub"] > mark_ts]
             targets.extend(newer["video_id"].tolist())
         else:
             targets.extend(ordered.head(bootstrap_per_channel)["video_id"].tolist())
@@ -349,15 +356,19 @@ def fetch_comments(
             continue
         raw_items.extend(items)
         for item in items:
-            top = ((item.get("snippet") or {}).get("topLevelComment") or {}).get("snippet") or {}
+            thread = item.get("snippet") or {}
+            top = (thread.get("topLevelComment") or {}).get("snippet") or {}
             rows.append(
                 {
                     "comment_id": item.get("id", ""),
                     "video_id": video_id,
+                    "parent_id": "",
                     "author": top.get("authorDisplayName", ""),
                     "text": top.get("textOriginal") or top.get("textDisplay") or "",
                     "like_count": int(top.get("likeCount") or 0),
+                    "reply_count": int(thread.get("totalReplyCount") or 0),
                     "published_at": top.get("publishedAt", ""),
+                    "updated_at": top.get("updatedAt") or top.get("publishedAt", ""),
                 }
             )
 

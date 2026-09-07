@@ -40,10 +40,41 @@ def load(df: pd.DataFrame, table_id: str, *, write_disposition: str) -> None:
         logger.info("[load] skip empty frame for %s", table_id)
         return
     client = get_bq_client()
+    aligned = _align_frame(df, table_id, client)
     job_config = bigquery.LoadJobConfig(write_disposition=write_disposition)
-    job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+    try:
+        table = client.get_table(table_id)
+        job_config.schema = table.schema
+    except Exception:
+        pass
+    job = client.load_table_from_dataframe(aligned, table_id, job_config=job_config)
     job.result()
-    logger.info("[load] %s rows -> %s (%s)", len(df), table_id, write_disposition)
+    logger.info("[load] %s rows -> %s (%s)", len(aligned), table_id, write_disposition)
+
+
+def _align_frame(df: pd.DataFrame, table_id: str, client: bigquery.Client) -> pd.DataFrame:
+    """Keep table columns only; coerce DATE / TIMESTAMP / INT64 for pyarrow."""
+    try:
+        schema = client.get_table(table_id).schema
+    except Exception:
+        return df
+    out = df.copy()
+    names = [field.name for field in schema]
+    for field in schema:
+        if field.name not in out.columns:
+            out[field.name] = None
+        col = out[field.name]
+        ftype = field.field_type
+        if ftype == "DATE":
+            parsed = pd.to_datetime(col, utc=True, errors="coerce")
+            out[field.name] = parsed.dt.date
+        elif ftype == "TIMESTAMP":
+            out[field.name] = pd.to_datetime(col, utc=True, errors="coerce")
+        elif ftype in {"INTEGER", "INT64"}:
+            out[field.name] = pd.to_numeric(col, errors="coerce").fillna(0).astype("int64")
+        elif ftype == "STRING":
+            out[field.name] = col.fillna("").astype(str)
+    return out[names]
 
 
 def load_staging(df: pd.DataFrame, stg_table: str, key: str | Sequence[str]) -> None:

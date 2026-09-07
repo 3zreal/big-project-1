@@ -2,7 +2,7 @@
 
 Data pipeline YouTube: **YouTube Data API v3 → Python → BigQuery**, triển khai trên Google Cloud VM và chạy lịch 2 lần/ngày.
 
-> Skeleton theo cấu trúc đề bài Big Project 1. Fetch slice + incremental MERGE đã có; `run()` nối đủ luồng ở phase 4.
+> Skeleton theo cấu trúc đề bài Big Project 1. `python main.py` fetch → MERGE BigQuery. Tạo dataset tay trên Console; code chỉ tạo bảng còn thiếu rồi ghi.
 
 ## Cấu trúc
 
@@ -23,7 +23,9 @@ youtube-data-pipeline/
 │   ├── retry.py        # backoff 429/5xx; không retry quotaExceeded
 │   ├── checkpoint.py   # set video_id pending/completed + watermark
 │   ├── batch.py        # MERGE videos → comments → checkpoint
-│   ├── transform.py    # làm sạch / chuẩn hóa → data/processed/
+│   ├── config.py       # table IDs from env
+│   ├── schema.py       # create missing tables (not datasets)
+│   ├── transform.py    # dtypes, extracted_at, ingestion_date
 │   ├── load.py         # APPEND raw, TRUNCATE stg_*, MERGE curated
 │   └── utils.py        # env, logging, BigQuery client, data/raw/{run_id}
 ├── data/
@@ -87,14 +89,12 @@ Mỗi method list ở trên = **1 unit**. Trần mặc định 10.000 unit/ngày
 
 Hard stop khi remaining Pacific < 1 unit cho call tiếp theo. Raw JSON: `data/raw/{run_id}/`. `uploads_playlist_id` cache: `data/processed/uploads_playlists.json` (gitignore).
 
-`main.py` chưa nối fetch slice này (phase 4).
-
 ## Incremental load (Phase 3)
 
 Không full-refresh như mức dễ (TRUNCATE cả bảng curated mỗi lần chạy). Luồng một batch:
 
 1. **APPEND** `youtube_raw.raw_*` (giữ lịch sử extract)
-2. **WRITE_TRUNCATE** chỉ `stg_videos` / `stg_comments` / `stg_channels` (dedupe PK trước khi MERGE)
+2. **WRITE_TRUNCATE** chỉ `stg_*` (dedupe PK trước khi MERGE)
 3. **SQL MERGE** vào `youtube_curated.videos` / `comments` / `artists` — không `WHEN NOT MATCHED BY SOURCE THEN DELETE`
 4. Snapshot kênh MERGE trên `(channel_id, snapshot_date)` — chạy lại cùng ngày UTC cập nhật row, không xóa ngày khác
 5. Checkpoint = **set** `video_id` (`comment_pending_video_ids` / `completed_video_ids`), không `playlist_page_token` / `last_video_id`
@@ -107,21 +107,22 @@ Watermark kênh chỉ tăng sau khi comments của batch đó durable hoặc vid
 
 ## Chạy local
 
+Tạo sẵn dataset `youtube_raw` và `youtube_curated` trên Console. Code **không** tạo dataset; bảng còn thiếu sẽ được tạo lúc chạy.
+
 ```bash
-python test_connect.py             # in ra ok = 1 là đạt
-python main.py                     # chạy pipeline (đang là skeleton)
+uv run python test_connect.py             # in ra ok = 1 là đạt
+uv run python main.py --limit 2           # demo 2 kênh → ghi BigQuery
+uv run python main.py                     # đủ 100 nghệ sĩ freeze CSV
 ```
 
-## BigQuery (dự kiến)
+## BigQuery
 
-Tự tạo dataset trên project GCP cá nhân:
-
-| Dataset | Vai trò |
+| Dataset | Bảng |
 |---|---|
-| `youtube_raw` | response gốc, đối soát / xử lý lại |
-| `youtube_curated` | dữ liệu đã clean, dùng cho phân tích |
+| `youtube_raw` | `raw_videos`, `raw_comments`, `raw_channels`, `stg_videos`, `stg_comments`, `stg_channels`, `stg_channel_snapshot` |
+| `youtube_curated` | `artists`, `videos`, `comments`, `channel_daily_snapshot`, `pipeline_runs`, `fetch_checkpoint` |
 
-Bảng tối thiểu (theo đề): `videos`, `comments`. Schema chi tiết sẽ bổ sung khi triển khai fetch/transform.
+Curated MERGE (không TRUNCATE). Raw APPEND. Staging TRUNCATE từng batch.
 
 ## Chạy trên Google Cloud VM
 

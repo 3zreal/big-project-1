@@ -6,6 +6,7 @@ Watermark advances only after comments are durable or skipped as commentsDisable
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -53,6 +54,7 @@ def ingest_video_comment_batch(
     checkpoint: dict[str, Any],
     merge_checkpoint_table: str | None = None,
     remainder: list[dict[str, Any]] | None = None,
+    prepare_comments: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """tables keys: raw_videos, stg_videos, videos, raw_comments, stg_comments, comments.
 
@@ -75,8 +77,12 @@ def ingest_video_comment_batch(
         comments = fetch_comments(comment_video_ids, ctx=ctx)
     except QuotaExceeded as err:
         comments = pd.DataFrame(list(getattr(err, "comment_rows", None) or []))
-        completed = list(getattr(err, "comment_completed", None) or [])
-        pending = list(getattr(err, "comment_pending", None) or comment_video_ids)
+        comments.attrs["comment_pending"] = list(getattr(err, "comment_pending", None) or comment_video_ids)
+        comments.attrs["comment_completed"] = list(getattr(err, "comment_completed", None) or [])
+        comments.attrs["skipped_disabled"] = list(getattr(err, "skipped_disabled", None) or [])
+        comments = _prepare(comments, prepare_comments)
+        completed = list(comments.attrs.get("comment_completed") or [])
+        pending = list(comments.attrs.get("comment_pending") or comment_video_ids)
         _merge_comments(comments, tables)
         checkpoint = mark_videos_completed(checkpoint, completed)
         _touch_quota(checkpoint, ctx)
@@ -89,6 +95,7 @@ def ingest_video_comment_batch(
         )
         raise
 
+    comments = _prepare(comments, prepare_comments)
     completed = list(comments.attrs.get("comment_completed") or [])
     _merge_comments(comments, tables)
     checkpoint = mark_videos_completed(checkpoint, completed)
@@ -100,6 +107,12 @@ def ingest_video_comment_batch(
     if merge_checkpoint_table:
         persist_checkpoint_bq(checkpoint, merge_checkpoint_table)
     return comments
+
+
+def _prepare(comments: pd.DataFrame, prepare_comments) -> pd.DataFrame:
+    if prepare_comments is None:
+        return comments
+    return prepare_comments(comments)
 
 
 def _merge_comments(comments: pd.DataFrame, tables: dict[str, str]) -> None:
@@ -134,6 +147,7 @@ def _advance_watermarks(
         channel_targets = [vid for vid in group["video_id"].tolist() if vid in comment_set]
         if any(vid in pending for vid in channel_targets):
             continue
-        newest = str(group["published_at"].max() or "") if "published_at" in group.columns else ""
+        newest_val = pd.to_datetime(group["published_at"], utc=True, errors="coerce").max()
+        newest = newest_val.strftime("%Y-%m-%dT%H:%M:%SZ") if pd.notna(newest_val) else ""
         checkpoint = maybe_advance_watermark(checkpoint, cid, newest, remainder)
     return checkpoint
