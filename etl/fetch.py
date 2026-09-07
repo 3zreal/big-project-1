@@ -296,8 +296,12 @@ def fetch_comments(
     ctx = ctx or get_context()
     rows: list[dict] = []
     raw_items: list[dict] = []
+    completed: list[str] = []
+    skipped_disabled: list[str] = []
+    pending_failed: list[str] = []
+    ids = list(video_ids)
 
-    for video_id in video_ids:
+    for i, video_id in enumerate(ids):
         try:
             resp = execute(
                 ctx.client.commentThreads().list(
@@ -310,21 +314,37 @@ def fetch_comments(
             )
         except QuotaStop:
             logger.warning("quota stop before comments for %s; returning %s rows", video_id, len(rows))
-            break
-        except QuotaExceeded:
+            pending = _pending_tail(pending_failed, ids, i)
+            write_json(ctx.run_dir / "comments.json", raw_items)
+            write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
+            frame = pd.DataFrame(rows)
+            frame.attrs["comment_pending"] = pending
+            frame.attrs["comment_completed"] = completed
+            frame.attrs["skipped_disabled"] = skipped_disabled
+            return frame
+        except QuotaExceeded as err:
+            pending = _pending_tail(pending_failed, ids, i)
+            err.comment_pending = pending
+            err.comment_completed = completed
+            err.comment_rows = rows
+            err.skipped_disabled = skipped_disabled
             write_json(ctx.run_dir / "comments.json", raw_items)
             write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
             raise
         except HttpError as err:
             if is_comments_disabled(err):
                 logger.info("skip commentsDisabled/unavailable video %s", video_id)
+                skipped_disabled.append(video_id)
+                completed.append(video_id)
                 continue
             logger.warning("commentThreads %s: %s", video_id, redact_http_error(err))
+            pending_failed.append(video_id)
             continue
 
         items = resp.get("items") or []
         if resp.get("nextPageToken"):
             logger.info("comment nextPageToken ignored for %s (one-page cap)", video_id)
+        completed.append(video_id)
         if not items:
             continue
         raw_items.extend(items)
@@ -343,4 +363,13 @@ def fetch_comments(
 
     write_json(ctx.run_dir / "comments.json", raw_items)
     write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    frame.attrs["comment_pending"] = list(dict.fromkeys(pending_failed))
+    frame.attrs["comment_completed"] = completed
+    frame.attrs["skipped_disabled"] = skipped_disabled
+    return frame
+
+
+def _pending_tail(failed: list[str], ids: list[str], index: int) -> list[str]:
+    """IDs that still need comments: prior failures plus current and unattempted."""
+    return list(dict.fromkeys([*failed, *ids[index:]]))

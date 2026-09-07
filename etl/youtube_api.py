@@ -8,6 +8,7 @@ from googleapiclient.errors import HttpError
 
 from etl.errors import QuotaExceeded, is_quota_exceeded, redact_http_error
 from etl.quota import LIST_CALL_UNITS, QuotaBudget
+from etl.retry import MAX_ATTEMPTS, should_retry, sleep_before_retry
 
 logger = logging.getLogger(__name__)
 
@@ -17,15 +18,27 @@ def build_youtube(api_key: str):
 
 
 def execute(request, quota: QuotaBudget) -> dict:
-    """Run one list() call: 1 unit. Stop locally before the call if remaining < 1."""
-    quota.ensure(LIST_CALL_UNITS)
-    try:
-        response = request.execute()
-    except HttpError as err:
+    """Run one list() call (1 unit). Retry 429/5xx only; never retry quotaExceeded."""
+    last_err: HttpError | None = None
+    for attempt in range(MAX_ATTEMPTS):
+        quota.ensure(LIST_CALL_UNITS)
+        try:
+            response = request.execute()
+        except HttpError as err:
+            last_err = err
+            redacted = redact_http_error(err)
+            if is_quota_exceeded(err):
+                quota.record(LIST_CALL_UNITS)
+                logger.error("%s", redacted)
+                raise QuotaExceeded(redacted) from err
+            if should_retry(err, attempt):
+                logger.warning("%s", redacted)
+                sleep_before_retry(attempt)
+                continue
+            quota.record(LIST_CALL_UNITS)
+            logger.warning("%s", redacted)
+            raise
         quota.record(LIST_CALL_UNITS)
-        if is_quota_exceeded(err):
-            logger.error("%s", redact_http_error(err))
-            raise QuotaExceeded(redact_http_error(err)) from err
-        raise
-    quota.record(LIST_CALL_UNITS)
-    return response
+        return response
+    assert last_err is not None
+    raise last_err

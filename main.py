@@ -4,12 +4,11 @@ Run:
     python main.py
 
 Copy .env.example to .env and set GOOGLE_APPLICATION_CREDENTIALS before running.
-"""
-import os
 
-from etl.fetch import fetch_comments, fetch_videos
-from etl.load import load
-from etl.transform import transform_comments, transform_videos
+Phase 3: load(..., *, write_disposition=) has no default. Curated tables MERGE
+from stg_* (never WRITE_TRUNCATE). Full run() wiring is phase 4.
+"""
+from etl.load import land_and_merge, load_staging, merge_from_staging
 from etl.utils import load_env, require_env, setup_logging
 
 
@@ -17,26 +16,15 @@ def run() -> None:
     """Run one YouTube → BigQuery pipeline pass."""
     load_env()
     logger = setup_logging()
-
-    project = require_env("GCP_PROJECT_ID")
-    dataset_raw = os.getenv("BQ_DATASET_RAW", "youtube_raw")
-    dataset_curated = os.getenv("BQ_DATASET_CURATED", "youtube_curated")
-
-    table_videos = f"{project}.{dataset_curated}.videos"
-    table_comments = f"{project}.{dataset_curated}.comments"
-    _ = dataset_raw  # reserved for loading raw API responses into BigQuery
+    require_env("GCP_PROJECT_ID")
 
     logger.info("Starting YouTube pipeline")
-
-    videos_raw = fetch_videos()
-    comments_raw = fetch_comments()
-
-    videos = transform_videos(videos_raw)
-    comments = transform_comments(comments_raw)
-
-    load(videos, table_videos)
-    load(comments, table_comments)
-
+    logger.info(
+        "Phase 4 wires freeze CSV → fetch → %s / %s / %s (no curated TRUNCATE)",
+        land_and_merge.__name__,
+        load_staging.__name__,
+        merge_from_staging.__name__,
+    )
     logger.info("Pipeline finished")
 
 

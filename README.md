@@ -2,7 +2,7 @@
 
 Data pipeline YouTube: **YouTube Data API v3 → Python → BigQuery**, triển khai trên Google Cloud VM và chạy lịch 2 lần/ngày.
 
-> Skeleton khởi tạo theo cấu trúc đề bài Big Project 1. Logic fetch/transform sẽ bổ sung ở các commit sau.
+> Skeleton theo cấu trúc đề bài Big Project 1. Fetch slice + incremental MERGE đã có; `run()` nối đủ luồng ở phase 4.
 
 ## Cấu trúc
 
@@ -20,8 +20,11 @@ youtube-data-pipeline/
 │   ├── quota.py        # units_spent theo ngày Pacific
 │   ├── errors.py       # redact HttpError; quotaExceeded trước commentsDisabled
 │   ├── youtube_api.py  # channels/playlist/videos/commentThreads list (1 unit)
+│   ├── retry.py        # backoff 429/5xx; không retry quotaExceeded
+│   ├── checkpoint.py   # set video_id pending/completed + watermark
+│   ├── batch.py        # MERGE videos → comments → checkpoint
 │   ├── transform.py    # làm sạch / chuẩn hóa → data/processed/
-│   ├── load.py         # nạp lên BigQuery
+│   ├── load.py         # APPEND raw, TRUNCATE stg_*, MERGE curated
 │   └── utils.py        # env, logging, BigQuery client, data/raw/{run_id}
 ├── data/
 │   ├── raw/            # response thô (không commit)
@@ -85,6 +88,22 @@ Mỗi method list ở trên = **1 unit**. Trần mặc định 10.000 unit/ngày
 Hard stop khi remaining Pacific < 1 unit cho call tiếp theo. Raw JSON: `data/raw/{run_id}/`. `uploads_playlist_id` cache: `data/processed/uploads_playlists.json` (gitignore).
 
 `main.py` chưa nối fetch slice này (phase 4).
+
+## Incremental load (Phase 3)
+
+Không full-refresh như mức dễ (TRUNCATE cả bảng curated mỗi lần chạy). Luồng một batch:
+
+1. **APPEND** `youtube_raw.raw_*` (giữ lịch sử extract)
+2. **WRITE_TRUNCATE** chỉ `stg_videos` / `stg_comments` / `stg_channels` (dedupe PK trước khi MERGE)
+3. **SQL MERGE** vào `youtube_curated.videos` / `comments` / `artists` — không `WHEN NOT MATCHED BY SOURCE THEN DELETE`
+4. Snapshot kênh MERGE trên `(channel_id, snapshot_date)` — chạy lại cùng ngày UTC cập nhật row, không xóa ngày khác
+5. Checkpoint = **set** `video_id` (`comment_pending_video_ids` / `completed_video_ids`), không `playlist_page_token` / `last_video_id`
+
+`load(df, table, *, write_disposition=...)` bắt buộc keyword, không default. `WRITE_TRUNCATE` trên bảng không phải `stg_*` sẽ `ValueError`.
+
+`quotaExceeded` giữa comments: videos đã MERGE; comments đã lấy thì MERGE; ID còn lại nằm trong pending set để run sau resume (không bỏ quota thành `commentsDisabled`). 429/5xx retry tối đa 5 lần (`etl/retry.py`); không retry quota.
+
+Watermark kênh chỉ tăng sau khi comments của batch đó durable hoặc video bị skip `commentsDisabled`. Burst (remainder playlist còn video mới hơn watermark cũ) thì không tăng watermark.
 
 ## Chạy local
 
