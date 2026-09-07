@@ -26,6 +26,7 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 *.csv
+!scripts/channel_overrides.csv
 *.parquet
 *.jsonl
 

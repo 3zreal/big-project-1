@@ -9,8 +9,10 @@ Data pipeline YouTube: **YouTube Data API v3 → Python → BigQuery**, triển 
 ```
 youtube-data-pipeline/
 ├── scripts/
-│   ├── billboard.py           # Artist 100 only (one-off freeze)
-│   └── fetch_artist_100.py
+│   ├── billboard.py              # Artist 100 only (one-off freeze)
+│   ├── fetch_artist_100.py
+│   ├── resolve_channel_ids.py    # Wikidata + forHandle (no search.list)
+│   └── channel_overrides.csv     # @handles → channels.list(forHandle=)
 ├── etl/
 │   ├── __init__.py
 │   ├── fetch.py        # YouTube Data API v3 → data/raw/
@@ -33,14 +35,11 @@ youtube-data-pipeline/
 ## Chuẩn bị
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate          # mac/linux
-# .venv\Scripts\activate           # windows
-
-pip install -r requirements.txt
-
+uv sync
 cp .env.example .env               # điền API key + GCP project + đường dẫn service account
 ```
+
+Hoặc `python -m venv` + `pip install -r requirements.txt`.
 
 Trong `.env`:
 
@@ -50,12 +49,19 @@ Trong `.env`:
 
 ## Freeze Artist 100 (một lần, không phải cron)
 
+Nguồn: Billboard Artist 100 (US), tuần chart ghi trong CSV. “US-UK” = nghệ sĩ UK (và khác) **khi họ chart trên list US** — không union chart UK.
+
 ```bash
-python scripts/fetch_artist_100.py
-# python scripts/fetch_artist_100.py --date 2026-08-29
+uv run python scripts/fetch_artist_100.py
+# uv run python scripts/fetch_artist_100.py --date 2026-08-29
+uv run python scripts/resolve_channel_ids.py   # cần YOUTUBE_API_KEY; không dùng search.list
 ```
 
-Ghi `data/processed/artists_registry.csv` (đã gitignore, không push). Pipeline YouTube đọc file này; không gọi Billboard khi chạy ETL.
+Ghi `data/processed/artists_registry.csv` (gitignore `*.csv`, không push). Pipeline YouTube **chỉ đọc** file này; `etl/` / `main.py` không gọi Billboard.
+
+Freeze **fail** nếu không đủ 100 `channel_id` dạng `UC…` unique. Bổ sung `@handle` công khai vào `scripts/channel_overrides.csv` rồi chạy lại resolver (script gọi `channels.list(forHandle=)` — chạy được trên VM, không scrape YouTube search).
+
+Chạy lại Billboard freeze **giữ** `channel_id` đã resolve nếu `artist_name` không đổi.
 
 ## Chạy local
 
