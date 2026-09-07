@@ -40,11 +40,11 @@ def main() -> None:
     chart_week, entries = fetch_artist_100(args.date)
     accessed_at = datetime.now(timezone.utc).date().isoformat()
 
+    # Re-runs keep already resolved channel fields for artists still on the chart.
     previous: dict[str, dict[str, str]] = {}
     if OUT_PATH.exists():
         with OUT_PATH.open(encoding="utf-8", newline="") as fh:
-            for row in csv.DictReader(fh):
-                previous[row.get("artist_name", "")] = row
+            previous = {row.get("artist_name", ""): row for row in csv.DictReader(fh)}
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", encoding="utf-8", newline="") as fh:

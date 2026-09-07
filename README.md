@@ -11,7 +11,8 @@ youtube-data-pipeline/
 ├── scripts/
 │   ├── billboard.py              # Artist 100 only (one-off freeze)
 │   ├── fetch_artist_100.py
-│   ├── resolve_channel_ids.py    # Wikidata + forHandle (no search.list)
+│   ├── resolve_channel_ids.py    # CLI: Wikidata + forHandle (no search.list)
+│   ├── resolve_channels/         # names.py, wikidata.py, youtube.py, pipeline.py
 │   └── channel_overrides.csv     # @handles → channels.list(forHandle=)
 ├── etl/
 │   ├── __init__.py

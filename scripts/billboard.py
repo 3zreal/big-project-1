@@ -72,30 +72,24 @@ def fetch_artist_100(
 
 def _parse_artist_100_page(soup: BeautifulSoup) -> tuple[str, list[ArtistEntry]]:
     picker = soup.select_one("#chart-date-picker")
-    if picker and picker.get("data-date"):
-        chart_week = picker["data-date"]
-    else:
-        chart_week = dt.date.today().isoformat()
+    chart_week = (picker.get("data-date") if picker else None) or dt.date.today().isoformat()
 
     entries: list[ArtistEntry] = []
     for row in soup.select("ul.o-chart-results-list-row"):
-        rank_el = row.select("li")[0].select_one("span.c-label")
-        title_el = row.select("li")[3].select_one("#title-of-a-story")
-        artist_el = row.select("li")[3].select_one("#title-of-a-story + span.c-label")
+        cells = row.select("li")
+        rank_el = cells[0].select_one("span.c-label")
+        title_el = cells[3].select_one("#title-of-a-story")
+        artist_el = cells[3].select_one("#title-of-a-story + span.c-label")
         if not rank_el or not title_el:
             raise BillboardParseException("Failed to parse rank or title")
-
-        title = title_el.text.strip()
-        artist = (artist_el.text.strip() if artist_el else "") or ""
-        # Artist 100 puts the name in the title slot and leaves artist empty.
-        if artist == "":
-            artist = title
 
         try:
             rank = int(rank_el.text.strip())
         except ValueError as exc:
             raise BillboardParseException("Failed to parse rank") from exc
 
+        # Artist 100 puts the name in the title slot and leaves the artist label empty.
+        artist = (artist_el.text.strip() if artist_el else "") or title_el.text.strip()
         entries.append(ArtistEntry(rank=rank, artist_name=artist))
 
     if not entries:
