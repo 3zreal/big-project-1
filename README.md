@@ -8,6 +8,9 @@ Data pipeline YouTube: **YouTube Data API v3 → Python → BigQuery**, triển 
 
 ```
 youtube-data-pipeline/
+├── scripts/
+│   ├── billboard.py           # Artist 100 only (one-off freeze)
+│   └── fetch_artist_100.py
 ├── etl/
 │   ├── __init__.py
 │   ├── fetch.py        # YouTube Data API v3 → data/raw/
@@ -16,7 +19,7 @@ youtube-data-pipeline/
 │   └── utils.py        # env, logging, BigQuery client
 ├── data/
 │   ├── raw/            # response thô (không commit)
-│   └── processed/      # dữ liệu đã clean (không commit)
+│   └── processed/      # không commit (gồm artists_registry.csv)
 ├── logs/               # nhật ký vận hành (không commit)
 ├── main.py             # run(): fetch → transform → load
 ├── test_connect.py     # kiểm tra kết nối BigQuery
@@ -44,6 +47,15 @@ Trong `.env`:
 - `YOUTUBE_API_KEY` — API key YouTube Data API v3 (không commit)
 - `GOOGLE_APPLICATION_CREDENTIALS` — đường dẫn file service account JSON
 - `GCP_PROJECT_ID`, `BQ_DATASET_RAW`, `BQ_DATASET_CURATED`
+
+## Freeze Artist 100 (một lần, không phải cron)
+
+```bash
+python scripts/fetch_artist_100.py
+# python scripts/fetch_artist_100.py --date 2026-08-29
+```
+
+Ghi `data/processed/artists_registry.csv` (đã gitignore, không push). Pipeline YouTube đọc file này; không gọi Billboard khi chạy ETL.
 
 ## Chạy local
 
