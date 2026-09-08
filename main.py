@@ -50,6 +50,7 @@ def run(limit: int | None = None) -> None:
     load_env()
     logger = setup_logging()
     logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
+    logging.getLogger("googleapiclient.http").setLevel(logging.ERROR)
     require_env("YOUTUBE_API_KEY")
     require_env("GCP_PROJECT_ID")
 

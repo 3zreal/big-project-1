@@ -6,7 +6,15 @@ import logging
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from etl.errors import QuotaExceeded, YoutubeApiError, _reasons, is_quota_exceeded, redact_http_error
+from etl.errors import (
+    QuotaExceeded,
+    YoutubeApiError,
+    _reasons,
+    is_comments_disabled,
+    is_playlist_not_found,
+    is_quota_exceeded,
+    redact_http_error,
+)
 from etl.quota import LIST_CALL_UNITS, QuotaBudget
 from etl.retry import MAX_ATTEMPTS, should_retry, sleep_before_retry
 
@@ -36,12 +44,16 @@ def execute(request, quota: QuotaBudget) -> dict:
                 sleep_before_retry(attempt)
                 continue
             quota.record(LIST_CALL_UNITS)
-            logger.warning("%s", redacted)
-            raise YoutubeApiError(
+            wrapped = YoutubeApiError(
                 redacted,
                 status=getattr(err.resp, "status", None),
                 reasons=_reasons(err),
-            ) from None
+            )
+            if is_comments_disabled(wrapped) or is_playlist_not_found(wrapped):
+                logger.debug("%s", redacted)
+            else:
+                logger.warning("%s", redacted)
+            raise wrapped from None
         quota.record(LIST_CALL_UNITS)
         return response
     assert last_err is not None
