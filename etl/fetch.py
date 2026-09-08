@@ -10,9 +10,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
-from googleapiclient.errors import HttpError
 
-from etl.errors import QuotaExceeded, QuotaStop, is_comments_disabled, redact_http_error
+from etl.errors import (
+    QuotaExceeded,
+    QuotaStop,
+    YoutubeApiError,
+    is_comments_disabled,
+    is_playlist_not_found,
+    redact_http_error,
+)
 from etl.quota import QuotaBudget
 from etl.utils import (
     DATA_PROCESSED_DIR,
@@ -175,14 +181,26 @@ def fetch_videos(
             logger.warning("no uploads playlist for %s, skip", channel_id)
             continue
         # ONE page. Never loop on nextPageToken.
-        resp = execute(
-            ctx.client.playlistItems().list(
-                part="contentDetails,snippet",
-                playlistId=playlist_id,
-                maxResults=PLAYLIST_PAGE_SIZE,
-            ),
-            ctx.quota,
-        )
+        try:
+            resp = execute(
+                ctx.client.playlistItems().list(
+                    part="contentDetails,snippet",
+                    playlistId=playlist_id,
+                    maxResults=PLAYLIST_PAGE_SIZE,
+                ),
+                ctx.quota,
+            )
+        except YoutubeApiError as err:
+            if is_playlist_not_found(err):
+                logger.warning(
+                    "uploads playlist missing for %s (%s); skip channel",
+                    channel_id,
+                    playlist_id,
+                )
+                ctx.playlist_ids.pop(channel_id, None)
+                _save_playlist_cache(ctx.playlist_ids)
+                continue
+            raise
         page_items = resp.get("items") or []
         if resp.get("nextPageToken"):
             logger.debug("playlist nextPageToken ignored for %s (one-page cap)", channel_id)
@@ -336,7 +354,7 @@ def fetch_comments(
             write_json(ctx.run_dir / "comments.json", raw_items)
             write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
             raise
-        except HttpError as err:
+        except YoutubeApiError as err:
             if is_comments_disabled(err):
                 logger.info("skip commentsDisabled/unavailable video %s", video_id)
                 skipped_disabled.append(video_id)
