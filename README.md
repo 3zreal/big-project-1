@@ -2,7 +2,7 @@
 
 Data pipeline YouTube: **YouTube Data API v3 → Python → BigQuery**, triển khai trên Google Cloud VM và chạy lịch 2 lần/ngày.
 
-> Skeleton theo cấu trúc đề bài Big Project 1. `python main.py` fetch → MERGE BigQuery. Tạo dataset tay trên Console; code chỉ tạo bảng còn thiếu rồi ghi.
+> `python main.py` fetch → MERGE BigQuery. Tạo dataset tay trên Console; code chỉ tạo bảng còn thiếu rồi ghi.
 
 ## Cấu trúc
 
@@ -72,7 +72,7 @@ Freeze **fail** nếu không đủ 100 `channel_id` dạng `UC…` unique. Bổ 
 
 Chạy lại Billboard freeze **giữ** `channel_id` đã resolve nếu `artist_name` không đổi.
 
-## Quota một lần chạy (Phase 2)
+## Quota một lần chạy
 
 Mỗi method list ở trên = **1 unit**. Trần mặc định 10.000 unit/ngày, reset nửa đêm **Pacific**. Không dùng `search.list`.
 
@@ -87,11 +87,11 @@ Mỗi method list ở trên = **1 unit**. Trần mặc định 10.000 unit/ngày
 | Một run steady-state | ~200–350 |
 | Một run bootstrap (comments lần đầu) | ~150 + ≤500 |
 
-Hard stop khi remaining Pacific < 1 unit cho call tiếp theo. Raw JSON: `data/raw/{run_id}/`. `uploads_playlist_id` cache: `data/processed/uploads_playlists.json` (gitignore).
+Dừng run khi remaining Pacific < 1 unit cho call tiếp theo. Raw JSON: `data/raw/{run_id}/`. `uploads_playlist_id` cache: `data/processed/uploads_playlists.json` (gitignore).
 
-## Incremental load (Phase 3)
+## Incremental load
 
-Không full-refresh như mức dễ (TRUNCATE cả bảng curated mỗi lần chạy). Luồng một batch:
+Không TRUNCATE bảng curated. Mỗi batch:
 
 1. **APPEND** `youtube_raw.raw_*` (giữ lịch sử extract)
 2. **WRITE_TRUNCATE** chỉ `stg_*` (dedupe PK trước khi MERGE)
@@ -129,9 +129,13 @@ Curated MERGE (không TRUNCATE). Raw APPEND. Staging TRUNCATE từng batch.
 1. Tạo Compute Engine VM, clone repo.
 2. Cài Python, tạo `.venv`, `pip install -r requirements.txt`.
 3. Copy `.env` và file service account lên VM (không đưa lên GitHub).
-4. `chmod +x run_pipeline.sh` rồi chạy thử `./run_pipeline.sh`.
+4. `chmod +x run_pipeline.sh` rồi chạy thử `./run_pipeline.sh` (ghi `logs/cron.log`).
 
-## Schedule (crontab) — 02 lần/ngày
+Script dùng `flock` trên Linux để lần 07:00 chưa xong thì 23:00 **bỏ qua** (không chạy chồng). Cron có `PATH` gần như rỗng — script tự set `PATH` và Python `.venv`.
+
+## Schedule (crontab) — 02 lần/ngày (ICT)
+
+Đặt timezone VM `Asia/Ho_Chi_Minh` (hoặc dùng `CRON_TZ`). Đường dẫn phải tuyệt đối:
 
 ```bash
 crontab -e
@@ -141,8 +145,6 @@ crontab -e
 0 7 * * *  /absolute/path/to/big-project-1/run_pipeline.sh
 0 23 * * * /absolute/path/to/big-project-1/run_pipeline.sh
 ```
-
-Log mỗi lần chạy: `logs/cron.log`.
 
 ## Tài liệu tham khảo
 

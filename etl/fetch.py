@@ -2,8 +2,6 @@
 
 Last N=20 videos/channel, one playlistItems page (no nextPageToken loop).
 Comments: order=time, max 1 page. Bootstrap = last 5 published/channel.
-
-Do not import this from a second parallel API. main.py wiring is phase 4.
 """
 from __future__ import annotations
 
@@ -187,7 +185,7 @@ def fetch_videos(
         )
         page_items = resp.get("items") or []
         if resp.get("nextPageToken"):
-            logger.info("playlist nextPageToken ignored for %s (one-page cap)", channel_id)
+            logger.debug("playlist nextPageToken ignored for %s (one-page cap)", channel_id)
 
         parsed: list[tuple[str, str]] = []
         for item in page_items:
@@ -350,7 +348,7 @@ def fetch_comments(
 
         items = resp.get("items") or []
         if resp.get("nextPageToken"):
-            logger.info("comment nextPageToken ignored for %s (one-page cap)", video_id)
+            logger.debug("comment nextPageToken ignored for %s (one-page cap)", video_id)
         completed.append(video_id)
         if not items:
             continue

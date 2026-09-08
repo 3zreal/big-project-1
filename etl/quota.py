@@ -31,7 +31,7 @@ def _state_path(pacific_date: str) -> Path:
 
 
 class QuotaBudget:
-    """Persist units_spent for the current Pacific date; hard-stop a run before overspend."""
+    """Persist units_spent for the current Pacific date; stop a run before overspend."""
 
     def __init__(self, *, daily_limit: int | None = None, pacific_date: str | None = None) -> None:
         self.pacific_date = pacific_date or pacific_today()
@@ -53,7 +53,7 @@ class QuotaBudget:
     def record(self, units: int = LIST_CALL_UNITS) -> None:
         self.units_spent += units
         self._save()
-        logger.info(
+        logger.debug(
             "quota pacific=%s spent=%s remaining=%s",
             self.pacific_date,
             self.units_spent,

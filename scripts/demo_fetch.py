@@ -1,4 +1,4 @@
-"""Local Phase 2 demo: fetch a few freeze-CSV channels. Not cron.
+"""Fetch a few freeze-CSV channels without loading BigQuery.
 
     uv run python scripts/demo_fetch.py --limit 2
 """
@@ -36,7 +36,7 @@ def _load_channels(limit: int) -> list[tuple[str, str]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Phase 2 fetch demo (subset of Artist 100)")
+    parser = argparse.ArgumentParser(description="Fetch a subset of Artist 100 (no BigQuery load)")
     parser.add_argument("--limit", type=int, default=2, help="How many freeze-CSV channels (default: 2)")
     args = parser.parse_args()
     if args.limit < 1:

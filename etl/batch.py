@@ -1,6 +1,6 @@
 """One video batch: MERGE videos → comments → checkpoint sets.
 
-Phase 4 calls this from run(). QuotaExceeded persists pending IDs and re-raises.
+QuotaExceeded persists pending IDs and re-raises.
 Watermark advances only after comments are durable or skipped as commentsDisabled.
 """
 from __future__ import annotations

@@ -152,7 +152,7 @@ def _ensure_table(
 ) -> None:
     try:
         client.get_table(table_id)
-        logger.info("table exists %s", table_id)
+        logger.debug("table exists %s", table_id)
         return
     except NotFound:
         pass

@@ -1,7 +1,7 @@
 """Resume state: sets of video_id, not playlist page tokens.
 
-Local JSON is always written (gitignored). Optional MERGE into
-youtube_curated.fetch_checkpoint when that table exists (phase 4).
+Local JSON is always written (gitignored). Also MERGE'd into
+youtube_curated.fetch_checkpoint when that table exists.
 """
 from __future__ import annotations
 
