@@ -16,18 +16,25 @@ youtube-data-pipeline/
 │   └── channel_overrides.csv     # @handles → channels.list(forHandle=)
 ├── etl/
 │   ├── __init__.py
-│   ├── fetch.py        # slice: N=20 videos/channel, 1 playlist page, comments 1 page
-│   ├── quota.py        # units_spent theo ngày Pacific
-│   ├── errors.py       # redact HttpError; quotaExceeded trước commentsDisabled
-│   ├── youtube_api.py  # channels/playlist/videos/commentThreads list (1 unit)
-│   ├── retry.py        # backoff 429/5xx; không retry quotaExceeded
-│   ├── checkpoint.py   # set video_id pending/completed + watermark
-│   ├── batch.py        # MERGE videos → comments → checkpoint
-│   ├── config.py       # table IDs from env
-│   ├── schema.py       # create missing tables (not datasets)
-│   ├── transform.py    # dtypes, extracted_at, ingestion_date
-│   ├── load.py         # APPEND raw, TRUNCATE stg_*, MERGE curated
-│   └── utils.py        # env, logging, BigQuery client, data/raw/{run_id}
+│   ├── fetch/                    # FETCH, tách theo API surface
+│   │   ├── context.py            # FetchContext, start_run, cache uploads playlist
+│   │   ├── channels.py           # channels.list, batch 50
+│   │   ├── videos.py             # 1 playlist page/kênh + videos.list
+│   │   ├── comments.py           # commentThreads.list + chọn video cần comment
+│   │   └── results.py            # VideoFetchResult / CommentFetchResult
+│   ├── quota.py          # units_spent theo ngày Pacific
+│   ├── errors.py         # redact HttpError; quotaExceeded trước commentsDisabled
+│   ├── youtube_api.py    # execute(): 1 unit, dịch HttpError → YoutubeApiError tại biên
+│   ├── retry.py          # backoff 429/5xx; không retry quotaExceeded
+│   ├── checkpoint.py     # set video_id pending/completed + watermark
+│   ├── batch.py          # MERGE videos → comments → checkpoint
+│   ├── config.py         # Tables (table IDs from env)
+│   ├── table_schemas.py  # cột của mọi bảng — nguồn sự thật duy nhất
+│   ├── schema.py         # create missing tables (not datasets)
+│   ├── transform.py      # dtypes, extracted_at, ingestion_date
+│   ├── load.py           # APPEND raw, TRUNCATE stg_*, MERGE curated
+│   ├── artist_registry.py  # đọc/ghi data/processed/artists_registry.csv
+│   └── utils.py          # paths, env, logging, JSON, chunked/dedupe, BQ client
 ├── data/
 │   ├── raw/            # response thô (không commit)
 │   └── processed/      # không commit (gồm artists_registry.csv)
@@ -50,6 +57,9 @@ cp .env.example .env               # điền API key + GCP project + đường d
 
 Hoặc `python -m venv` + `pip install -r requirements.txt`.
 
+`uv sync` cài luôn project (pyproject có `[build-system]`), nên `etl`/`scripts` import
+được từ bất kỳ thư mục nào — entrypoint không cần vá `sys.path`.
+
 Trong `.env`:
 
 - `YOUTUBE_API_KEY` — API key YouTube Data API v3 (không commit)
@@ -61,9 +71,9 @@ Trong `.env`:
 Nguồn: Billboard Artist 100 (US), tuần chart ghi trong CSV. “US-UK” = nghệ sĩ UK (và khác) **khi họ chart trên list US** — không union chart UK.
 
 ```bash
-uv run python scripts/fetch_artist_100.py
-# uv run python scripts/fetch_artist_100.py --date 2026-08-29
-uv run python scripts/resolve_channel_ids.py   # cần YOUTUBE_API_KEY; không dùng search.list
+uv run yt-freeze-artist-100
+# uv run yt-freeze-artist-100 --date 2026-08-29
+uv run yt-resolve-channels     # cần YOUTUBE_API_KEY; không dùng search.list
 ```
 
 Ghi `data/processed/artists_registry.csv` (gitignore `*.csv`, không push). Pipeline YouTube **chỉ đọc** file này; `etl/` / `main.py` không gọi Billboard.
@@ -111,8 +121,9 @@ Tạo sẵn dataset `youtube_raw` và `youtube_curated` trên Console. Code **kh
 
 ```bash
 uv run python test_connect.py             # in ra ok = 1 là đạt
-uv run python main.py --limit 2           # demo 2 kênh → ghi BigQuery
-uv run python main.py                     # đủ 100 nghệ sĩ freeze CSV
+uv run yt-pipeline --limit 2              # demo 2 kênh → ghi BigQuery
+uv run yt-pipeline                        # đủ 100 nghệ sĩ freeze CSV
+uv run yt-demo-fetch --limit 2            # fetch thử, không ghi BigQuery
 ```
 
 ## BigQuery

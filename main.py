@@ -11,28 +11,28 @@ Code creates missing tables, then APPEND raw / MERGE curated. No dataset create.
 from __future__ import annotations
 
 import argparse
-import logging
 from datetime import datetime, timezone
 
 import pandas as pd
 
+from etl.artist_registry import read_registry_rows
 from etl.batch import ingest_channel_facts, ingest_video_comment_batch
-from etl.checkpoint import load_checkpoint
+from etl.checkpoint import load_checkpoint, resume_comment_targets
 from etl.errors import QuotaExceeded, QuotaStop
 from etl.fetch import fetch_channels, fetch_videos, select_comment_targets, start_run
 from etl.load import append_raw
 from etl.schema import ensure_tables
-from etl.transform import transform_channels, transform_comments, transform_snapshot, transform_videos
-from etl.utils import load_env, read_registry_rows, require_env, setup_logging
+from etl.transform import (
+    transform_channels,
+    transform_comments,
+    transform_snapshot,
+    transform_videos,
+)
+from etl.utils import bootstrap
 
 
 def run(limit: int | None = None) -> None:
-    load_env()
-    logger = setup_logging()
-    logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
-    logging.getLogger("googleapiclient.http").setLevel(logging.ERROR)
-    require_env("YOUTUBE_API_KEY")
-    require_env("GCP_PROJECT_ID")
+    logger = bootstrap(require=("YOUTUBE_API_KEY", "GCP_PROJECT_ID"))
 
     tables = ensure_tables()
     registry = pd.DataFrame(read_registry_rows(limit))
@@ -51,8 +51,10 @@ def run(limit: int | None = None) -> None:
 
     try:
         channels = fetch_channels(channel_ids, ctx=ctx)
-        videos = fetch_videos(channel_ids, watermark=watermarks, ctx=ctx)
+        video_result = fetch_videos(channel_ids, watermark=watermarks, ctx=ctx)
+        videos = video_result.frame
         extracted_at = datetime.now(timezone.utc)
+
         channels_t = transform_channels(
             channels, artists=registry, run_id=ctx.run_id, extracted_at=extracted_at
         )
@@ -66,12 +68,10 @@ def run(limit: int | None = None) -> None:
         snapshot = transform_snapshot(channels_t, run_id=ctx.run_id, extracted_at=extracted_at)
         ingest_channel_facts(channels_t, tables=tables, snapshot=snapshot)
 
-        comment_ids = select_comment_targets(videos, watermark=watermarks)
         known = set(videos["video_id"].astype(str)) if not videos.empty else set()
-        pending = [
-            vid for vid in (checkpoint.get("comment_pending_video_ids") or []) if vid and vid in known
-        ]
-        comment_ids = list(dict.fromkeys([*pending, *comment_ids]))
+        comment_ids = resume_comment_targets(
+            checkpoint, known, select_comment_targets(videos, watermark=watermarks)
+        )
 
         def prepare_comments(frame: pd.DataFrame) -> pd.DataFrame:
             return transform_comments(
@@ -88,10 +88,9 @@ def run(limit: int | None = None) -> None:
             ctx=ctx,
             tables=tables,
             checkpoint=checkpoint,
-            merge_checkpoint_table=tables["fetch_checkpoint"],
-            remainder=list(videos.attrs.get("remainder") or []),
+            remainder_blocked=video_result.blocked_channel_ids(),
             prepare_comments=prepare_comments,
-        )
+        ).frame
     except (QuotaExceeded, QuotaStop) as err:
         status = "quota"
         error_message = str(err)
@@ -119,7 +118,7 @@ def run(limit: int | None = None) -> None:
             ]
         )
         try:
-            append_raw(run_row, tables["pipeline_runs"])
+            append_raw(run_row, tables.pipeline_runs)
         except Exception:
             logger.exception("failed to append pipeline_runs")
         logger.info(

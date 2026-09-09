@@ -12,7 +12,6 @@ from etl.errors import (
     is_comments_disabled,
     is_playlist_not_found,
     is_quota_exceeded,
-    redact_http_error,
 )
 from etl.quota import LIST_CALL_UNITS, QuotaBudget
 from etl.retry import MAX_ATTEMPTS, should_retry, sleep_before_retry
@@ -29,30 +28,30 @@ def build_youtube(api_key: str):
 
 def execute(request, quota: QuotaBudget) -> dict:
     """Run one list() call (1 unit). Retry 429/5xx only; never retry quotaExceeded."""
-    last_err: HttpError | None = None
+    last_err: YoutubeApiError | None = None
     for attempt in range(MAX_ATTEMPTS):
         quota.ensure(LIST_CALL_UNITS)
         try:
             response = request.execute()
-        except HttpError as err:
+        except HttpError as raw:
+            # Translate once, here, so every branch below classifies the same object.
+            err = YoutubeApiError.from_http(raw)
             last_err = err
-            redacted = redact_http_error(err)
             if is_quota_exceeded(err):
                 quota.record(LIST_CALL_UNITS)
-                logger.error("%s", redacted)
-                raise QuotaExceeded(redacted) from None
+                logger.error("%s", err)
+                raise QuotaExceeded(str(err)) from None
             if should_retry(err, attempt):
-                logger.warning("%s", redacted)
+                logger.warning("%s", err)
                 sleep_before_retry(attempt)
                 continue
             quota.record(LIST_CALL_UNITS)
-            wrapped = YoutubeApiError.from_http(err)
-            if is_comments_disabled(wrapped) or is_playlist_not_found(wrapped):
-                logger.debug("%s", redacted)
+            if is_comments_disabled(err) or is_playlist_not_found(err):
+                logger.debug("%s", err)
             else:
-                logger.warning("%s", redacted)
-            raise wrapped from None
+                logger.warning("%s", err)
+            raise err from None
         quota.record(LIST_CALL_UNITS)
         return response
     assert last_err is not None
-    raise YoutubeApiError.from_http(last_err) from None
+    raise last_err from None

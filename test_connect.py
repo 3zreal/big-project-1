@@ -2,7 +2,8 @@
 
 A successful run that prints ok = 1 means the setup is ready.
 """
-from etl.utils import get_bq_client, load_env
+from etl.utils import get_bq_client
+from etl.utils import load_env
 
 load_env()
 client = get_bq_client()

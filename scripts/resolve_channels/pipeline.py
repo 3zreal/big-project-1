@@ -1,10 +1,12 @@
 """Resolve, validate and write channel IDs onto the artist registry CSV."""
 from __future__ import annotations
 
-import csv
 import logging
 
-from etl.utils import REGISTRY_PATH, ROOT_DIR, load_env, require_env, setup_logging
+from etl.artist_registry import REGISTRY_PATH, read_registry, write_registry
+from etl.utils import require_env
+from etl.utils import bootstrap
+from etl.utils import ROOT_DIR
 
 from .names import (
     is_topic_channel,
@@ -136,20 +138,6 @@ def _validate_pass(
     return rejected
 
 
-def _read_registry() -> tuple[list[str], list[dict]]:
-    with REGISTRY.open(encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        fieldnames = list(reader.fieldnames or [])
-        return fieldnames, list(reader)
-
-
-def _write_registry(fieldnames: list[str], rows: list[dict]) -> None:
-    with REGISTRY.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def _require_full_cohort(rows: list[dict]) -> None:
     """Fail closed unless every artist ended up with a distinct UC channel ID."""
     resolved = [r["channel_id"] for r in rows if _has_channel(r)]
@@ -165,14 +153,13 @@ def _require_full_cohort(rows: list[dict]) -> None:
 
 
 def main() -> None:
-    setup_logging("resolve_channels.log")
-    load_env()
+    bootstrap("resolve_channels.log", logger_name="resolve_channels")
     api_key = require_env("YOUTUBE_API_KEY")
 
     if not REGISTRY.exists():
         raise SystemExit(f"Missing {REGISTRY}. Run: uv run python scripts/fetch_artist_100.py")
 
-    fieldnames, rows = _read_registry()
+    fieldnames, rows = read_registry()
     overrides = load_handle_overrides(OVERRIDES)
     client = build_client(api_key)
     label_map = channels_for_labels(
@@ -198,5 +185,5 @@ def main() -> None:
         _validate_pass(client, rows, overrides, reject_vevo=False, titles=titles)
 
     _require_full_cohort(rows)
-    _write_registry(fieldnames, rows)
+    write_registry(rows, fieldnames)
     print(f"OK: {COHORT_SIZE} unique channel IDs written to {REGISTRY}")

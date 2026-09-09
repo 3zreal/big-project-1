@@ -4,8 +4,9 @@ from __future__ import annotations
 import csv
 import re
 import unicodedata
-from collections.abc import Callable, Iterable
 from pathlib import Path
+
+from etl.utils import dedupe
 
 # Billboard spells a few acts differently from Wikidata / YouTube.
 _ALIASES: dict[str, tuple[str, ...]] = {
@@ -17,18 +18,6 @@ _ALIASES: dict[str, tuple[str, ...]] = {
 MAX_HANDLE_GUESSES = 6
 # Below this length a label is too generic to prove a title mismatch.
 MIN_MATCH_LENGTH = 4
-
-
-def dedupe(values: Iterable[str], *, key: Callable[[str], str] | None = None) -> list[str]:
-    """Order-preserving de-duplication that also drops empty strings."""
-    seen: set[str] = set()
-    unique: list[str] = []
-    for value in values:
-        marker = key(value) if key else value
-        if value and marker not in seen:
-            seen.add(marker)
-            unique.append(value)
-    return unique
 
 
 def search_names(artist_name: str) -> list[str]:

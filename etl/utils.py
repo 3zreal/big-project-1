@@ -1,8 +1,10 @@
-"""Shared helpers: env, logging, paths, BigQuery client, registry CSV, raw JSON."""
-import csv
+"""Shared helpers: paths, env, logging, JSON files, sequences, BigQuery client."""
+from __future__ import annotations
+
 import json
 import logging
 import os
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -14,30 +16,14 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_RAW_DIR = ROOT_DIR / "data" / "raw"
 DATA_PROCESSED_DIR = ROOT_DIR / "data" / "processed"
 LOGS_DIR = ROOT_DIR / "logs"
-REGISTRY_PATH = DATA_PROCESSED_DIR / "artists_registry.csv"
+
+# Google's client is chatty at INFO; every entrypoint wants these quiet.
+_NOISY_LOGGERS = ("googleapiclient.discovery_cache", "googleapiclient.http")
 
 
 def load_env() -> None:
     """Load environment variables from the project-root .env file."""
     load_dotenv(ROOT_DIR / ".env")
-
-
-def setup_logging(log_file: str | None = None) -> logging.Logger:
-    """Log to console and file (default: logs/pipeline.log)."""
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    path = LOGS_DIR / (log_file or "pipeline.log")
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(path, encoding="utf-8"),
-        ],
-        force=True,
-    )
-    return logging.getLogger("pipeline")
 
 
 def require_env(name: str) -> str:
@@ -50,6 +36,36 @@ def require_env(name: str) -> str:
     return value
 
 
+def setup_logging(log_file: str | None = None) -> logging.Logger:
+    """Log to console and file (default: logs/pipeline.log)."""
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOGS_DIR / (log_file or "pipeline.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(), logging.FileHandler(path, encoding="utf-8")],
+        force=True,
+    )
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.ERROR)
+    return logging.getLogger("pipeline")
+
+
+def bootstrap(
+    log_file: str | None = None,
+    *,
+    require: tuple[str, ...] = (),
+    logger_name: str = "pipeline",
+) -> logging.Logger:
+    """Load .env, configure logging, fail early on missing env vars."""
+    load_env()
+    setup_logging(log_file)
+    for name in require:
+        require_env(name)
+    return logging.getLogger(logger_name)
+
+
 @lru_cache(maxsize=1)
 def get_bq_client():
     """Create (once per process) a BigQuery client from GOOGLE_APPLICATION_CREDENTIALS."""
@@ -59,29 +75,22 @@ def get_bq_client():
     return bigquery.Client(project=project) if project else bigquery.Client()
 
 
-def chunked(values: list[str], size: int):
+def chunked(values: list[str], size: int) -> Iterator[list[str]]:
     """Yield successive size-length slices of values."""
     for i in range(0, len(values), size):
         yield values[i : i + size]
 
 
-def read_registry_rows(limit: int | None = None) -> list[dict[str, str]]:
-    """Freeze-CSV rows that have a resolved UC channel_id, in chart order."""
-    if not REGISTRY_PATH.exists():
-        raise SystemExit(
-            f"Missing {REGISTRY_PATH}. Run scripts/fetch_artist_100.py then resolve_channel_ids.py"
-        )
-    rows: list[dict[str, str]] = []
-    with REGISTRY_PATH.open(encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh):
-            if not (row.get("channel_id") or "").strip().startswith("UC"):
-                continue
-            rows.append(row)
-            if limit is not None and len(rows) >= limit:
-                break
-    if not rows:
-        raise SystemExit("No UC channel_id in the freeze CSV")
-    return rows
+def dedupe(values: Iterable[str], *, key: Callable[[str], str] | None = None) -> list[str]:
+    """Order-preserving de-duplication that also drops empty strings."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        marker = key(value) if key else value
+        if value and marker not in seen:
+            seen.add(marker)
+            unique.append(value)
+    return unique
 
 
 def new_run_id() -> str:
@@ -103,4 +112,7 @@ def write_json(path: Path, payload: Any) -> None:
 def load_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return {} if default is None else default
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {} if default is None else default

@@ -1,19 +1,14 @@
 """Fetch a few freeze-CSV channels without loading BigQuery.
 
-    uv run python scripts/demo_fetch.py --limit 2
+    uv run python -m scripts.demo_fetch --limit 2
 """
 from __future__ import annotations
 
 import argparse
-import logging
-import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
+from etl.artist_registry import read_registry_rows
 from etl.fetch import fetch_channels, fetch_comments, fetch_videos, select_comment_targets, start_run
-from etl.utils import read_registry_rows, setup_logging
+from etl.utils import bootstrap
 
 
 def main() -> None:
@@ -23,8 +18,7 @@ def main() -> None:
     if args.limit < 1:
         raise SystemExit("--limit must be >= 1")
 
-    setup_logging("demo_fetch.log")
-    logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
+    bootstrap("demo_fetch.log")
 
     artists = [
         (row.get("artist_name") or row["channel_id"].strip(), row["channel_id"].strip())
@@ -36,12 +30,15 @@ def main() -> None:
     ctx = start_run()
     channels = fetch_channels(channel_ids, ctx=ctx)
     videos = fetch_videos(channel_ids, ctx=ctx)
-    comment_ids = select_comment_targets(videos)
+    comment_ids = select_comment_targets(videos.frame)
     comments = fetch_comments(comment_ids, ctx=ctx)
 
     print(f"run_id={ctx.run_id}")
     print(f"raw={ctx.run_dir}")
-    print(f"channels_df={len(channels)} videos={len(videos)} comment_targets={len(comment_ids)} comments={len(comments)}")
+    print(
+        f"channels_df={len(channels)} videos={len(videos.frame)} "
+        f"comment_targets={len(comment_ids)} comments={len(comments.frame)}"
+    )
     print(f"quota={ctx.quota.snapshot()}")
 
 

@@ -1,7 +1,8 @@
-"""BigQuery table IDs from env. Does not create datasets."""
+"""BigQuery table IDs from env, as a typed object. Does not create datasets."""
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 from etl.utils import require_env
 
@@ -18,29 +19,41 @@ def dataset_curated() -> str:
     return os.getenv("BQ_DATASET_CURATED", "youtube_curated")
 
 
-def table(kind: str, name: str) -> str:
-    """kind is 'raw' or 'curated'. Example: table('curated', 'videos')."""
+@dataclass(frozen=True)
+class Tables:
+    """Fully-qualified table IDs. Attribute access, so a typo fails at lint time."""
+
+    raw_videos: str
+    raw_comments: str
+    raw_channels: str
+    stg_videos: str
+    stg_comments: str
+    stg_channels: str
+    stg_snapshot: str
+    artists: str
+    videos: str
+    comments: str
+    channel_daily_snapshot: str
+    pipeline_runs: str
+    fetch_checkpoint: str
+
+
+def tables() -> Tables:
     project = project_id()
-    if kind == "curated":
-        return f"{project}.{dataset_curated()}.{name}"
-    if kind == "raw":
-        return f"{project}.{dataset_raw()}.{name}"
-    raise ValueError(f"unknown dataset kind {kind!r}")
-
-
-def tables() -> dict[str, str]:
-    return {
-        "raw_videos": table("raw", "raw_videos"),
-        "raw_comments": table("raw", "raw_comments"),
-        "raw_channels": table("raw", "raw_channels"),
-        "stg_videos": table("raw", "stg_videos"),
-        "stg_comments": table("raw", "stg_comments"),
-        "stg_channels": table("raw", "stg_channels"),
-        "stg_snapshot": table("raw", "stg_channel_snapshot"),
-        "artists": table("curated", "artists"),
-        "videos": table("curated", "videos"),
-        "comments": table("curated", "comments"),
-        "channel_daily_snapshot": table("curated", "channel_daily_snapshot"),
-        "pipeline_runs": table("curated", "pipeline_runs"),
-        "fetch_checkpoint": table("curated", "fetch_checkpoint"),
-    }
+    raw = f"{project}.{dataset_raw()}"
+    curated = f"{project}.{dataset_curated()}"
+    return Tables(
+        raw_videos=f"{raw}.raw_videos",
+        raw_comments=f"{raw}.raw_comments",
+        raw_channels=f"{raw}.raw_channels",
+        stg_videos=f"{raw}.stg_videos",
+        stg_comments=f"{raw}.stg_comments",
+        stg_channels=f"{raw}.stg_channels",
+        stg_snapshot=f"{raw}.stg_channel_snapshot",
+        artists=f"{curated}.artists",
+        videos=f"{curated}.videos",
+        comments=f"{curated}.comments",
+        channel_daily_snapshot=f"{curated}.channel_daily_snapshot",
+        pipeline_runs=f"{curated}.pipeline_runs",
+        fetch_checkpoint=f"{curated}.fetch_checkpoint",
+    )

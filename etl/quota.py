@@ -5,7 +5,6 @@ resetting at midnight America/Los_Angeles.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from datetime import datetime
@@ -13,6 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from etl.errors import QuotaStop
+from etl.utils import load_json, write_json
 from etl.utils import DATA_RAW_DIR
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ class QuotaBudget:
             os.getenv("YOUTUBE_QUOTA_DAILY", str(DEFAULT_DAILY_LIMIT))
         )
         self.path = _state_path(self.pacific_date)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.units_spent = self._load()
 
     def remaining(self) -> int:
@@ -69,19 +70,11 @@ class QuotaBudget:
         }
 
     def _load(self) -> int:
-        if not self.path.exists():
-            return 0
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return 0
+        payload = load_json(self.path, default={})
         if payload.get("pacific_date") != self.pacific_date:
             return 0
         return int(payload.get("units_spent") or 0)
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self.snapshot(), indent=2) + "\n",
-            encoding="utf-8",
-        )
+        """Durable after every unit: a crashed run must not re-spend its quota."""
+        write_json(self.path, self.snapshot())

@@ -10,7 +10,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from etl.utils import DATA_PROCESSED_DIR, load_json, write_json
+from etl.utils import dedupe
+from etl.utils import load_json, write_json
+from etl.utils import DATA_PROCESSED_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +20,13 @@ CHECKPOINT_PATH = DATA_PROCESSED_DIR / "fetch_checkpoint.json"
 DEFAULT_KEY = "artist100"
 
 
-def empty_checkpoint(*, pacific_date: str = "", units_spent: int = 0) -> dict[str, Any]:
+def empty_checkpoint() -> dict[str, Any]:
     return {
         "checkpoint_key": DEFAULT_KEY,
         "comment_pending_video_ids": [],
         "completed_video_ids": [],
-        "units_spent": units_spent,
-        "pacific_date": pacific_date,
+        "units_spent": 0,
+        "pacific_date": "",
         "watermarks": {},
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -63,6 +65,19 @@ def save_checkpoint(state: dict[str, Any]) -> None:
     )
 
 
+def resume_comment_targets(
+    state: dict[str, Any], known_video_ids: set[str], fresh: list[str]
+) -> list[str]:
+    """Video IDs still owed comments: last run's leftovers first, then this run's picks.
+
+    Leftovers are kept only when the video is still in the current fetch slice.
+    """
+    pending = [
+        vid for vid in (state.get("comment_pending_video_ids") or []) if vid in known_video_ids
+    ]
+    return dedupe([*pending, *fresh])
+
+
 def mark_videos_pending(state: dict[str, Any], video_ids: list[str]) -> dict[str, Any]:
     pending = set(state.get("comment_pending_video_ids") or [])
     done = set(state.get("completed_video_ids") or [])
@@ -80,32 +95,16 @@ def mark_videos_completed(state: dict[str, Any], video_ids: list[str]) -> dict[s
     return state
 
 
-def set_watermark(state: dict[str, Any], channel_id: str, published_at: str) -> dict[str, Any]:
-    """Advance only after the caller knows comments for that slice are durable."""
-    marks = dict(state.get("watermarks") or {})
-    marks[channel_id] = published_at
-    state["watermarks"] = marks
-    return state
-
-
-def blocked_channels(remainder: list[dict[str, Any]] | None) -> set[str]:
-    """Channels whose unfetched playlist remainder is newer than the prior mark."""
-    return {
-        str(row.get("channel_id"))
-        for row in (remainder or [])
-        if row.get("newer_than_watermark")
-    }
-
-
 def maybe_advance_watermark(
     state: dict[str, Any],
     channel_id: str,
     published_at: str,
     blocked: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Skip advance when unfetched playlist remainder is still newer than the prior mark.
+    """Advance only after the caller knows comments for that slice are durable.
 
-    blocked comes from blocked_channels(remainder), built once per batch.
+    Skipped when unfetched playlist remainder is still newer than the prior mark;
+    `blocked` comes from VideoFetchResult.blocked_channel_ids(), built once per batch.
     """
     if channel_id in blocked:
         logger.warning(
@@ -115,7 +114,10 @@ def maybe_advance_watermark(
         return state
     if not published_at:
         return state
-    return set_watermark(state, channel_id, published_at)
+    marks = dict(state.get("watermarks") or {})
+    marks[channel_id] = published_at
+    state["watermarks"] = marks
+    return state
 
 
 def checkpoint_row(state: dict[str, Any]) -> dict[str, Any]:
@@ -132,6 +134,7 @@ def checkpoint_row(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _as_id_list(value: Any) -> list[str]:
+    """Accepts the local JSON list form and the BigQuery JSON-string form."""
     if value is None:
         return []
     if isinstance(value, str):
