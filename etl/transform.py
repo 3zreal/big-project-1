@@ -4,7 +4,7 @@ Called after fetch, before staging load. tags stay STRING.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -29,10 +29,24 @@ def _int(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").fillna(0).astype("int64")
 
 
-def _col(df: pd.DataFrame, name: str, fill="") -> pd.Series:
-    if name in df.columns:
-        return df[name]
+def _col(df: pd.DataFrame, *names: str, fill="") -> pd.Series:
+    """First present column among names; a fill-valued series when none exist."""
+    for name in names:
+        if name in df.columns:
+            return df[name]
     return pd.Series([fill] * len(df))
+
+
+def _lookup(frame: pd.DataFrame | None, value: str, key: str = "channel_id") -> dict:
+    """key -> value dict from a reference frame; {} when either column is absent."""
+    if frame is None or frame.empty or key not in frame.columns or value not in frame.columns:
+        return {}
+    return frame.set_index(key)[value].to_dict()
+
+
+def _mapped(series: pd.Series, mapping: dict, fill: str = "") -> pd.Series:
+    """Vectorised dict lookup; missing keys become fill."""
+    return series.astype(str).map(mapping).fillna(fill).astype("string")
 
 
 def transform_channels(
@@ -44,26 +58,20 @@ def transform_channels(
 ) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    names = artists.set_index("channel_id")["artist_name"].to_dict() if not artists.empty else {}
-    ranks = artists.set_index("channel_id")["rank"].to_dict() if (not artists.empty and "rank" in artists.columns) else {}
-    weeks = (
-        artists.set_index("channel_id")["chart_week"].to_dict()
-        if (not artists.empty and "chart_week" in artists.columns)
-        else {}
-    )
+    names = _lookup(artists, "artist_name")
+    ranks = _lookup(artists, "rank")
+    weeks = _lookup(artists, "chart_week")
     out = pd.DataFrame(
         {
             "channel_id": _col(df, "channel_id").fillna("").astype("string"),
-            "artist_name": df["channel_id"].map(lambda c: names.get(str(c), "")).fillna("").astype("string"),
+            "artist_name": _mapped(df["channel_id"], names),
             "channel_title": _col(df, "channel_title").fillna("").astype("string"),
-            "chart_rank": pd.to_numeric(df["channel_id"].map(lambda c: ranks.get(str(c), 0)), errors="coerce")
-            .fillna(0)
-            .astype("int64"),
-            "chart_week": df["channel_id"].map(lambda c: weeks.get(str(c), "")).fillna("").astype("string"),
+            "chart_rank": _int(df["channel_id"].astype(str).map(ranks)),
+            "chart_week": _mapped(df["channel_id"], weeks),
             "published_at": _as_ts(_col(df, "published_at")),
-            "subscriber_count": _int(_col(df, "subscriber_count", 0)),
-            "view_count": _int(_col(df, "view_count", 0)),
-            "video_count": _int(_col(df, "video_count", 0)),
+            "subscriber_count": _int(_col(df, "subscriber_count", fill=0)),
+            "view_count": _int(_col(df, "view_count", fill=0)),
+            "video_count": _int(_col(df, "video_count", fill=0)),
             "uploads_playlist_id": _col(df, "uploads_playlist_id").fillna("").astype("string"),
         }
     )
@@ -104,26 +112,24 @@ def transform_videos(
         empty = pd.DataFrame()
         empty.attrs["remainder"] = remainder
         return empty
-    names = artists.set_index("channel_id")["artist_name"].to_dict() if not artists.empty else {}
-    titles = {}
-    if channels is not None and not channels.empty:
-        titles = channels.set_index("channel_id")["channel_title"].to_dict()
-    title_col = df["video_title"] if "video_title" in df.columns else _col(df, "title")
+    names = _lookup(artists, "artist_name")
+    titles = _lookup(channels, "channel_title")
+    title_col = _col(df, "video_title", "title")
     out = pd.DataFrame(
         {
             "video_id": _col(df, "video_id").fillna("").astype("string"),
             "channel_id": _col(df, "channel_id").fillna("").astype("string"),
-            "artist_name": df["channel_id"].map(lambda c: names.get(str(c), "")).fillna("").astype("string"),
-            "channel_title": df["channel_id"].map(lambda c: titles.get(str(c), "")).fillna("").astype("string"),
+            "artist_name": _mapped(df["channel_id"], names),
+            "channel_title": _mapped(df["channel_id"], titles),
             "video_title": title_col.fillna("").astype("string"),
             "description": _col(df, "description").fillna("").astype("string"),
             "published_at": _as_ts(_col(df, "published_at")),
             "duration": _col(df, "duration").fillna("").astype("string"),
             "tags": _col(df, "tags").fillna("").astype("string"),
             "category_id": _col(df, "category_id").fillna("").astype("string"),
-            "view_count": _int(_col(df, "view_count", 0)),
-            "like_count": _int(_col(df, "like_count", 0)),
-            "comment_count": _int(_col(df, "comment_count", 0)),
+            "view_count": _int(_col(df, "view_count", fill=0)),
+            "like_count": _int(_col(df, "like_count", fill=0)),
+            "comment_count": _int(_col(df, "comment_count", fill=0)),
         }
     )
     for key, val in _lineage(run_id, extracted_at).items():
@@ -145,38 +151,29 @@ def transform_comments(
         empty = pd.DataFrame()
         empty.attrs.update(attrs)
         return empty
-    video_channel = {}
-    if videos is not None and not videos.empty and "video_id" in videos.columns:
-        video_channel = videos.set_index("video_id")["channel_id"].astype(str).to_dict()
-    names = artists.set_index("channel_id")["artist_name"].to_dict() if not artists.empty else {}
-    author = df["author_name"] if "author_name" in df.columns else _col(df, "author")
-    text = df["comment_text"] if "comment_text" in df.columns else _col(df, "text")
-    channel_ids = df["video_id"].map(lambda v: str(video_channel.get(str(v), "")))
-    updated = _col(df, "updated_at") if "updated_at" in df.columns else _col(df, "published_at")
+    video_channel = _lookup(videos, "channel_id", key="video_id")
+    video_channel = {str(k): str(v) for k, v in video_channel.items()}
+    names = _lookup(artists, "artist_name")
+    author = _col(df, "author_name", "author")
+    text = _col(df, "comment_text", "text")
+    channel_ids = df["video_id"].astype(str).map(video_channel).fillna("")
+    updated = _col(df, "updated_at", "published_at")
     out = pd.DataFrame(
         {
             "comment_id": _col(df, "comment_id").fillna("").astype("string"),
             "video_id": _col(df, "video_id").fillna("").astype("string"),
             "channel_id": channel_ids.fillna("").astype("string"),
-            "artist_name": channel_ids.map(lambda c: names.get(str(c), "")).fillna("").astype("string"),
+            "artist_name": _mapped(channel_ids, names),
             "parent_id": _col(df, "parent_id").fillna("").astype("string"),
             "author_name": author.fillna("").astype("string"),
             "comment_text": text.fillna("").astype("string"),
             "published_at": _as_ts(_col(df, "published_at")),
             "updated_at": _as_ts(updated),
-            "like_count": _int(_col(df, "like_count", 0)),
-            "reply_count": _int(_col(df, "reply_count", 0)),
+            "like_count": _int(_col(df, "like_count", fill=0)),
+            "reply_count": _int(_col(df, "reply_count", fill=0)),
         }
     )
     for key, val in _lineage(run_id, extracted_at).items():
         out[key] = val
     out.attrs.update(attrs)
     return out
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def ingestion_today() -> date:
-    return utc_now().date()

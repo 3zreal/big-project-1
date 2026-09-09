@@ -16,7 +16,6 @@ from dataclasses import dataclass
 import requests
 from bs4 import BeautifulSoup
 
-CHART_SLUG = "artist-100"
 CHART_URL = "https://www.billboard.com/charts/artist-100"
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

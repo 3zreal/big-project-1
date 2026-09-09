@@ -3,11 +3,8 @@ from __future__ import annotations
 
 import csv
 import logging
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-from etl.utils import require_env
+from etl.utils import REGISTRY_PATH, ROOT_DIR, load_env, require_env, setup_logging
 
 from .names import (
     is_topic_channel,
@@ -19,9 +16,8 @@ from .names import (
 from .wikidata import channels_for_labels, lookup_wikidata
 from .youtube import build_client, lookup_handle, resolve_via_handles, validate_channels
 
-ROOT = Path(__file__).resolve().parents[2]
-REGISTRY = ROOT / "data" / "processed" / "artists_registry.csv"
-OVERRIDES = ROOT / "scripts" / "channel_overrides.csv"
+REGISTRY = REGISTRY_PATH
+OVERRIDES = ROOT_DIR / "scripts" / "channel_overrides.csv"
 COHORT_SIZE = 100
 
 logger = logging.getLogger("resolve_channels")
@@ -109,9 +105,16 @@ def _validate_pass(
     overrides: dict[str, str],
     *,
     reject_vevo: bool,
+    titles: dict[str, str] | None = None,
 ) -> list[dict]:
-    """Re-check every resolved ID, store titles, clear rejects and return the cleared rows."""
-    titles = validate_channels(client, [r["channel_id"] for r in rows if _has_channel(r)])
+    """Re-check every resolved ID, store titles, clear rejects and return the cleared rows.
+
+    titles accumulates across passes, so a retry only validates IDs not yet seen.
+    """
+    titles = {} if titles is None else titles
+    unseen = [r["channel_id"] for r in rows if _has_channel(r) and r["channel_id"] not in titles]
+    if unseen:
+        titles.update(validate_channels(client, unseen))
 
     rejected: list[dict] = []
     for row in rows:
@@ -162,12 +165,8 @@ def _require_full_cohort(rows: list[dict]) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    load_dotenv(ROOT / ".env")
+    setup_logging("resolve_channels.log")
+    load_env()
     api_key = require_env("YOUTUBE_API_KEY")
 
     if not REGISTRY.exists():
@@ -183,19 +182,20 @@ def main() -> None:
     for row in rows:
         resolve_row(client, row, overrides, label_map)
 
-    rejected = _validate_pass(client, rows, overrides, reject_vevo=True)
+    titles: dict[str, str] = {}
+    rejected = _validate_pass(client, rows, overrides, reject_vevo=True, titles=titles)
     if rejected:
         logger.info("Retrying %s rejected IDs via forHandle", len(rejected))
         for row in rejected:
             resolve_row(client, row, overrides, label_map, skip_wikidata=True)
 
-        for row in _validate_pass(client, rows, overrides, reject_vevo=True):
+        for row in _validate_pass(client, rows, overrides, reject_vevo=True, titles=titles):
             channel_id = lookup_wikidata(row["artist_name"], label_map)
             if channel_id:
                 _set_channel(row, channel_id, "wikidata_p2397")
                 logger.warning("last-resort Wikidata %s -> %s", row["artist_name"], channel_id)
 
-        _validate_pass(client, rows, overrides, reject_vevo=False)
+        _validate_pass(client, rows, overrides, reject_vevo=False, titles=titles)
 
     _require_full_cohort(rows)
     _write_registry(fieldnames, rows)

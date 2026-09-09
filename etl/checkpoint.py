@@ -66,24 +66,17 @@ def save_checkpoint(state: dict[str, Any]) -> None:
 def mark_videos_pending(state: dict[str, Any], video_ids: list[str]) -> dict[str, Any]:
     pending = set(state.get("comment_pending_video_ids") or [])
     done = set(state.get("completed_video_ids") or [])
-    for vid in video_ids:
-        if vid and vid not in done:
-            pending.add(vid)
-    state["comment_pending_video_ids"] = sorted(pending)
+    state["comment_pending_video_ids"] = sorted(pending | ({v for v in video_ids if v} - done))
     return state
 
 
 def mark_videos_completed(state: dict[str, Any], video_ids: list[str]) -> dict[str, Any]:
     """Comments MERGEd or skipped as commentsDisabled — safe to drop from pending."""
+    ids = {v for v in video_ids if v}
     pending = set(state.get("comment_pending_video_ids") or [])
     done = set(state.get("completed_video_ids") or [])
-    for vid in video_ids:
-        if not vid:
-            continue
-        pending.discard(vid)
-        done.add(vid)
-    state["comment_pending_video_ids"] = sorted(pending)
-    state["completed_video_ids"] = sorted(done)
+    state["comment_pending_video_ids"] = sorted(pending - ids)
+    state["completed_video_ids"] = sorted(done | ids)
     return state
 
 
@@ -95,18 +88,26 @@ def set_watermark(state: dict[str, Any], channel_id: str, published_at: str) -> 
     return state
 
 
+def blocked_channels(remainder: list[dict[str, Any]] | None) -> set[str]:
+    """Channels whose unfetched playlist remainder is newer than the prior mark."""
+    return {
+        str(row.get("channel_id"))
+        for row in (remainder or [])
+        if row.get("newer_than_watermark")
+    }
+
+
 def maybe_advance_watermark(
     state: dict[str, Any],
     channel_id: str,
     published_at: str,
-    remainder: list[dict[str, Any]] | None = None,
+    blocked: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Skip advance when unfetched playlist remainder is still newer than the prior mark."""
-    blocked = any(
-        (row.get("channel_id") == channel_id) and row.get("newer_than_watermark")
-        for row in (remainder or [])
-    )
-    if blocked:
+    """Skip advance when unfetched playlist remainder is still newer than the prior mark.
+
+    blocked comes from blocked_channels(remainder), built once per batch.
+    """
+    if channel_id in blocked:
         logger.warning(
             "watermark not advanced for %s (unfetched remainder newer than prior mark)",
             channel_id,

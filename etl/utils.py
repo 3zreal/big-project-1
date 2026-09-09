@@ -1,8 +1,10 @@
-"""Shared helpers: env, logging, paths, BigQuery client, raw JSON."""
+"""Shared helpers: env, logging, paths, BigQuery client, registry CSV, raw JSON."""
+import csv
 import json
 import logging
 import os
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_RAW_DIR = ROOT_DIR / "data" / "raw"
 DATA_PROCESSED_DIR = ROOT_DIR / "data" / "processed"
 LOGS_DIR = ROOT_DIR / "logs"
+REGISTRY_PATH = DATA_PROCESSED_DIR / "artists_registry.csv"
 
 
 def load_env() -> None:
@@ -47,12 +50,38 @@ def require_env(name: str) -> str:
     return value
 
 
+@lru_cache(maxsize=1)
 def get_bq_client():
-    """Create a BigQuery client from GOOGLE_APPLICATION_CREDENTIALS."""
+    """Create (once per process) a BigQuery client from GOOGLE_APPLICATION_CREDENTIALS."""
     from google.cloud import bigquery
 
     project = os.getenv("GCP_PROJECT_ID")
     return bigquery.Client(project=project) if project else bigquery.Client()
+
+
+def chunked(values: list[str], size: int):
+    """Yield successive size-length slices of values."""
+    for i in range(0, len(values), size):
+        yield values[i : i + size]
+
+
+def read_registry_rows(limit: int | None = None) -> list[dict[str, str]]:
+    """Freeze-CSV rows that have a resolved UC channel_id, in chart order."""
+    if not REGISTRY_PATH.exists():
+        raise SystemExit(
+            f"Missing {REGISTRY_PATH}. Run scripts/fetch_artist_100.py then resolve_channel_ids.py"
+        )
+    rows: list[dict[str, str]] = []
+    with REGISTRY_PATH.open(encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            if not (row.get("channel_id") or "").strip().startswith("UC"):
+                continue
+            rows.append(row)
+            if limit is not None and len(rows) >= limit:
+                break
+    if not rows:
+        raise SystemExit("No UC channel_id in the freeze CSV")
+    return rows
 
 
 def new_run_id() -> str:

@@ -22,6 +22,7 @@ from etl.errors import (
 from etl.quota import QuotaBudget
 from etl.utils import (
     DATA_PROCESSED_DIR,
+    chunked,
     load_env,
     load_json,
     new_run_id,
@@ -29,7 +30,7 @@ from etl.utils import (
     require_env,
     write_json,
 )
-from etl.youtube_api import build_youtube, execute
+from etl.youtube_api import ID_BATCH, build_youtube, execute
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,7 @@ VIDEOS_PER_CHANNEL = 20
 PLAYLIST_PAGE_SIZE = 50
 COMMENT_BOOTSTRAP_PER_CHANNEL = 5
 COMMENT_PAGE_SIZE = 100
-ID_BATCH = 50
 PLAYLIST_CACHE = DATA_PROCESSED_DIR / "uploads_playlists.json"
-
-_CTX: FetchContext | None = None
 
 
 @dataclass
@@ -53,8 +51,7 @@ class FetchContext:
 
 
 def start_run(*, daily_limit: int | None = None) -> FetchContext:
-    """Open quota + data/raw/{run_id}/. Call once per process unless tests pass ctx."""
-    global _CTX
+    """Open quota + data/raw/{run_id}/. One context per run; callers pass it explicitly."""
     load_env()
     api_key = require_env("YOUTUBE_API_KEY")
     run_id = new_run_id()
@@ -65,13 +62,8 @@ def start_run(*, daily_limit: int | None = None) -> FetchContext:
         run_dir=raw_run_dir(run_id),
         playlist_ids=_load_playlist_cache(),
     )
-    _CTX = ctx
     logger.info("fetch run_id=%s pacific=%s remaining=%s", run_id, ctx.quota.pacific_date, ctx.quota.remaining())
     return ctx
-
-
-def get_context() -> FetchContext:
-    return _CTX if _CTX is not None else start_run()
 
 
 def _load_playlist_cache() -> dict[str, str]:
@@ -84,19 +76,23 @@ def _save_playlist_cache(mapping: dict[str, str]) -> None:
     write_json(PLAYLIST_CACHE, mapping)
 
 
-def _chunks(values: list[str], size: int = ID_BATCH):
-    for i in range(0, len(values), size):
-        yield values[i : i + size]
+def _uploads_id(item: dict) -> str:
+    """contentDetails.relatedPlaylists.uploads, or '' when absent."""
+    return (
+        item.get("contentDetails", {})
+        .get("relatedPlaylists", {})
+        .get("uploads")
+        or ""
+    )
 
 
-def fetch_channels(channel_ids: list[str], *, ctx: FetchContext | None = None) -> pd.DataFrame:
+def fetch_channels(channel_ids: list[str], *, ctx: FetchContext) -> pd.DataFrame:
     """channels.list in batches of 50 (stats + contentDetails). ~2 units for 100 IDs."""
-    ctx = ctx or get_context()
     wanted = list(dict.fromkeys(cid for cid in channel_ids if cid.startswith("UC")))
     items: list[dict] = []
     missing: list[str] = []
 
-    for batch in _chunks(wanted):
+    for batch in chunked(wanted, ID_BATCH):
         resp = execute(
             ctx.client.channels().list(
                 part="snippet,statistics,contentDetails",
@@ -111,12 +107,7 @@ def fetch_channels(channel_ids: list[str], *, ctx: FetchContext | None = None) -
                 missing.append(cid)
                 continue
             item = found[cid]
-            uploads = (
-                item.get("contentDetails", {})
-                .get("relatedPlaylists", {})
-                .get("uploads")
-                or ""
-            )
+            uploads = _uploads_id(item)
             if uploads.startswith("UU"):
                 ctx.playlist_ids[cid] = uploads
             items.append(item)
@@ -135,12 +126,7 @@ def _channels_frame(items: list[dict]) -> pd.DataFrame:
     for item in items:
         snippet = item.get("snippet") or {}
         stats = item.get("statistics") or {}
-        uploads = (
-            item.get("contentDetails", {})
-            .get("relatedPlaylists", {})
-            .get("uploads")
-            or ""
-        )
+        uploads = _uploads_id(item)
         rows.append(
             {
                 "channel_id": item["id"],
@@ -160,14 +146,13 @@ def fetch_videos(
     n: int = VIDEOS_PER_CHANNEL,
     watermark: dict[str, str] | None = None,
     *,
-    ctx: FetchContext | None = None,
+    ctx: FetchContext,
 ) -> pd.DataFrame:
     """One playlistItems page per channel, keep up to n, then videos.list batches of 50.
 
     Does not paginate uploads. Remainder IDs on that page are logged and written to
     raw JSON so a later watermark must not jump past them.
     """
-    ctx = ctx or get_context()
     need_playlists = [cid for cid in channel_ids if cid not in ctx.playlist_ids]
     if need_playlists:
         fetch_channels(need_playlists, ctx=ctx)
@@ -239,7 +224,7 @@ def fetch_videos(
 
     video_ids = list(dict.fromkeys(vid for _, vid, _ in picked))
     raw_items: list[dict] = []
-    for batch in _chunks(video_ids):
+    for batch in chunked(video_ids, ID_BATCH):
         resp = execute(
             ctx.client.videos().list(
                 part="snippet,statistics,contentDetails,status",
@@ -292,31 +277,51 @@ def select_comment_targets(
     """Steady-state: videos newer than watermark. Bootstrap: last 5 published/channel."""
     if videos.empty:
         return []
+    marks = watermark or {}
+    # Parse once for the whole frame; grouping stays in original channel order so the
+    # fetch queue (and therefore what survives a mid-run quota stop) is unchanged.
+    frame = videos[["channel_id", "video_id", "published_at"]].copy()
+    frame["_pub"] = pd.to_datetime(frame["published_at"], utc=True, errors="coerce")
     targets: list[str] = []
-    for channel_id, group in videos.groupby("channel_id", sort=False):
-        ordered = group.copy()
-        ordered["_pub"] = pd.to_datetime(ordered["published_at"], utc=True, errors="coerce")
-        ordered = ordered.sort_values("_pub", ascending=False)
-        mark = (watermark or {}).get(str(channel_id))
+    for channel_id, group in frame.groupby("channel_id", sort=False):
+        ordered = group.sort_values("_pub", ascending=False)
+        mark = marks.get(str(channel_id))
         if mark:
             mark_ts = pd.to_datetime(mark, utc=True, errors="coerce")
-            newer = ordered[ordered["_pub"] > mark_ts]
-            targets.extend(newer["video_id"].tolist())
+            targets.extend(ordered.loc[ordered["_pub"] > mark_ts, "video_id"].tolist())
         else:
-            targets.extend(ordered.head(bootstrap_per_channel)["video_id"].tolist())
+            targets.extend(ordered["video_id"].head(bootstrap_per_channel).tolist())
     return list(dict.fromkeys(targets))
+
+
+def _comment_result(
+    ctx: FetchContext,
+    raw_items: list[dict],
+    rows: list[dict],
+    *,
+    pending: list[str],
+    completed: list[str],
+    skipped: list[str],
+) -> pd.DataFrame:
+    """Every exit from fetch_comments persists this pass and returns this shape."""
+    write_json(ctx.run_dir / "comments.json", raw_items)
+    write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
+    frame = pd.DataFrame(rows)
+    frame.attrs["comment_pending"] = list(dict.fromkeys(pending))
+    frame.attrs["comment_completed"] = completed
+    frame.attrs["skipped_disabled"] = skipped
+    return frame
 
 
 def fetch_comments(
     video_ids: list[str],
     max_pages: int = 1,
     *,
-    ctx: FetchContext | None = None,
+    ctx: FetchContext,
 ) -> pd.DataFrame:
     """commentThreads.list, order=time, at most max_pages (default 1). Skip commentsDisabled."""
     if max_pages != 1:
         logger.warning("comment page cap is 1; ignoring max_pages=%s", max_pages)
-    ctx = ctx or get_context()
     rows: list[dict] = []
     raw_items: list[dict] = []
     completed: list[str] = []
@@ -337,22 +342,21 @@ def fetch_comments(
             )
         except QuotaStop:
             logger.warning("quota stop before comments for %s; returning %s rows", video_id, len(rows))
-            pending = _pending_tail(pending_failed, ids, i)
-            write_json(ctx.run_dir / "comments.json", raw_items)
-            write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
-            frame = pd.DataFrame(rows)
-            frame.attrs["comment_pending"] = pending
-            frame.attrs["comment_completed"] = completed
-            frame.attrs["skipped_disabled"] = skipped_disabled
-            return frame
+            return _comment_result(
+                ctx, raw_items, rows,
+                pending=_pending_tail(pending_failed, ids, i),
+                completed=completed, skipped=skipped_disabled,
+            )
         except QuotaExceeded as err:
-            pending = _pending_tail(pending_failed, ids, i)
-            err.comment_pending = pending
+            frame = _comment_result(
+                ctx, raw_items, rows,
+                pending=_pending_tail(pending_failed, ids, i),
+                completed=completed, skipped=skipped_disabled,
+            )
+            err.comment_pending = frame.attrs["comment_pending"]
             err.comment_completed = completed
             err.comment_rows = rows
             err.skipped_disabled = skipped_disabled
-            write_json(ctx.run_dir / "comments.json", raw_items)
-            write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
             raise
         except YoutubeApiError as err:
             if is_comments_disabled(err):
@@ -388,13 +392,10 @@ def fetch_comments(
                 }
             )
 
-    write_json(ctx.run_dir / "comments.json", raw_items)
-    write_json(ctx.run_dir / "quota.json", ctx.quota.snapshot())
-    frame = pd.DataFrame(rows)
-    frame.attrs["comment_pending"] = list(dict.fromkeys(pending_failed))
-    frame.attrs["comment_completed"] = completed
-    frame.attrs["skipped_disabled"] = skipped_disabled
-    return frame
+    return _comment_result(
+        ctx, raw_items, rows,
+        pending=pending_failed, completed=completed, skipped=skipped_disabled,
+    )
 
 
 def _pending_tail(failed: list[str], ids: list[str], index: int) -> list[str]:

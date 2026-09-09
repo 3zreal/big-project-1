@@ -31,6 +31,15 @@ class YoutubeApiError(Exception):
         self.status = status
         self.reasons = reasons or []
 
+    @classmethod
+    def from_http(cls, err: HttpError) -> "YoutubeApiError":
+        """Single boundary translation: redact the key, keep status + reason codes."""
+        return cls(
+            redact_http_error(err),
+            status=getattr(err.resp, "status", None),
+            reasons=_reasons(err),
+        )
+
 
 class QuotaStop(Exception):
     """Local budget: remaining Pacific units cannot cover the next 1-unit call."""
@@ -40,35 +49,48 @@ class QuotaExceeded(Exception):
     """YouTube returned reason=quotaExceeded. Do not retry until Pacific midnight."""
 
 
+def _reason_codes(err: HttpError | YoutubeApiError | BaseException | str) -> list[str]:
+    """Reason codes the API itself returned, or [] when the payload is unreadable."""
+    if isinstance(err, YoutubeApiError):
+        return err.reasons
+    return _reasons(err) if isinstance(err, HttpError) else []
+
+
+def _status_code(err: HttpError | YoutubeApiError | BaseException | str) -> int | None:
+    if isinstance(err, YoutubeApiError):
+        return err.status
+    return getattr(getattr(err, "resp", None), "status", None)
+
+
+# Reason codes are the stable contract; the text checks below only cover a payload
+# that failed to parse, where _reason_codes() comes back empty.
+_SKIP_REASONS = frozenset({"commentsDisabled", "videoNotFound", "processingFailure"})
+
+
 def is_quota_exceeded(err: HttpError | YoutubeApiError | BaseException) -> bool:
     """True when Google billed this call as quota exhaustion.
 
     Check reason/message *before* treating a generic 403 as commentsDisabled.
     """
-    reasons = err.reasons if isinstance(err, YoutubeApiError) else _reasons(err) if isinstance(err, HttpError) else []
-    if any(reason == "quotaExceeded" for reason in reasons):
+    if "quotaExceeded" in _reason_codes(err):
         return True
     return "quotaexceeded" in redact_http_error(err).lower()
 
 
 def is_playlist_not_found(err: HttpError | YoutubeApiError | BaseException | str) -> bool:
     """Uploads playlist missing or private — skip this channel, do not abort the run."""
-    reasons = err.reasons if isinstance(err, YoutubeApiError) else _reasons(err) if isinstance(err, HttpError) else []
-    if any(reason == "playlistNotFound" for reason in reasons):
+    if "playlistNotFound" in _reason_codes(err):
         return True
-    status = err.status if isinstance(err, YoutubeApiError) else getattr(getattr(err, "resp", None), "status", None)
-    if status == 404:
-        return "playlist" in redact_http_error(err).lower()
-    return "playlistnotfound" in redact_http_error(err).lower()
+    text = redact_http_error(err).lower()
+    if _status_code(err) == 404:
+        return "playlist" in text
+    return "playlistnotfound" in text
 
 
 def is_comments_disabled(err: HttpError | YoutubeApiError) -> bool:
     """Skip this video only after quotaExceeded has been ruled out."""
     if is_quota_exceeded(err):
         return False
-    skip = {"commentsDisabled", "videoNotFound", "processingFailure"}
-    reasons = err.reasons if isinstance(err, YoutubeApiError) else _reasons(err)
-    if any(reason in skip for reason in reasons):
+    if not _SKIP_REASONS.isdisjoint(_reason_codes(err)):
         return True
-    status = err.status if isinstance(err, YoutubeApiError) else getattr(err.resp, "status", None)
-    return status == 403
+    return _status_code(err) == 403

@@ -138,7 +138,18 @@ def ensure_tables() -> dict[str, str]:
         (ids["pipeline_runs"], RUN_SCHEMA, None, None),
         (ids["fetch_checkpoint"], CHECKPOINT_SCHEMA, None, None),
     ]
+    # Two list_tables calls instead of one get_table probe per spec; _ensure_table
+    # keeps its own NotFound guard for the create race.
+    existing: set[str] = set()
+    for ds_name in (dataset_raw(), dataset_curated()):
+        existing.update(
+            f"{project}.{ds_name}.{item.table_id}"
+            for item in client.list_tables(f"{project}.{ds_name}")
+        )
     for table_id, schema, partition_field, cluster in specs:
+        if table_id in existing:
+            logger.debug("table exists %s", table_id)
+            continue
         _ensure_table(client, table_id, schema, partition_field, cluster)
     return ids
 

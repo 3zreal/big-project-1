@@ -11,7 +11,6 @@ Code creates missing tables, then APPEND raw / MERGE curated. No dataset create.
 from __future__ import annotations
 
 import argparse
-import csv
 import logging
 from datetime import datetime, timezone
 
@@ -24,26 +23,7 @@ from etl.fetch import fetch_channels, fetch_videos, select_comment_targets, star
 from etl.load import append_raw
 from etl.schema import ensure_tables
 from etl.transform import transform_channels, transform_comments, transform_snapshot, transform_videos
-from etl.utils import DATA_PROCESSED_DIR, load_env, require_env, setup_logging
-
-REGISTRY = DATA_PROCESSED_DIR / "artists_registry.csv"
-
-
-def load_registry(limit: int | None = None) -> pd.DataFrame:
-    if not REGISTRY.exists():
-        raise SystemExit(f"Missing {REGISTRY}. Run scripts/fetch_artist_100.py then resolve_channel_ids.py")
-    rows = []
-    with REGISTRY.open(encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh):
-            cid = (row.get("channel_id") or "").strip()
-            if not cid.startswith("UC"):
-                continue
-            rows.append(row)
-            if limit is not None and len(rows) >= limit:
-                break
-    if not rows:
-        raise SystemExit("No UC channel_id in the freeze CSV")
-    return pd.DataFrame(rows)
+from etl.utils import load_env, read_registry_rows, require_env, setup_logging
 
 
 def run(limit: int | None = None) -> None:
@@ -55,7 +35,7 @@ def run(limit: int | None = None) -> None:
     require_env("GCP_PROJECT_ID")
 
     tables = ensure_tables()
-    registry = load_registry(limit)
+    registry = pd.DataFrame(read_registry_rows(limit))
     channel_ids = [str(c) for c in registry["channel_id"].tolist()]
     logger.info("Starting YouTube pipeline channels=%s", len(channel_ids))
 

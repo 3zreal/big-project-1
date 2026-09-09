@@ -9,7 +9,6 @@ from googleapiclient.errors import HttpError
 from etl.errors import (
     QuotaExceeded,
     YoutubeApiError,
-    _reasons,
     is_comments_disabled,
     is_playlist_not_found,
     is_quota_exceeded,
@@ -19,6 +18,9 @@ from etl.quota import LIST_CALL_UNITS, QuotaBudget
 from etl.retry import MAX_ATTEMPTS, should_retry, sleep_before_retry
 
 logger = logging.getLogger(__name__)
+
+# channels.list / videos.list accept at most 50 ids per call.
+ID_BATCH = 50
 
 
 def build_youtube(api_key: str):
@@ -44,11 +46,7 @@ def execute(request, quota: QuotaBudget) -> dict:
                 sleep_before_retry(attempt)
                 continue
             quota.record(LIST_CALL_UNITS)
-            wrapped = YoutubeApiError(
-                redacted,
-                status=getattr(err.resp, "status", None),
-                reasons=_reasons(err),
-            )
+            wrapped = YoutubeApiError.from_http(err)
             if is_comments_disabled(wrapped) or is_playlist_not_found(wrapped):
                 logger.debug("%s", redacted)
             else:
@@ -57,8 +55,4 @@ def execute(request, quota: QuotaBudget) -> dict:
         quota.record(LIST_CALL_UNITS)
         return response
     assert last_err is not None
-    raise YoutubeApiError(
-        redact_http_error(last_err),
-        status=getattr(last_err.resp, "status", None),
-        reasons=_reasons(last_err),
-    ) from None
+    raise YoutubeApiError.from_http(last_err) from None

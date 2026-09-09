@@ -40,23 +40,21 @@ def load(df: pd.DataFrame, table_id: str, *, write_disposition: str) -> None:
         logger.info("[load] skip empty frame for %s", table_id)
         return
     client = get_bq_client()
-    aligned = _align_frame(df, table_id, client)
     job_config = bigquery.LoadJobConfig(write_disposition=write_disposition)
     try:
-        table = client.get_table(table_id)
-        job_config.schema = table.schema
+        schema = client.get_table(table_id).schema
+        job_config.schema = schema
     except Exception:
-        pass
+        schema = None
+    aligned = _align_frame(df, schema)
     job = client.load_table_from_dataframe(aligned, table_id, job_config=job_config)
     job.result()
     logger.info("[load] %s rows -> %s (%s)", len(aligned), table_id, write_disposition)
 
 
-def _align_frame(df: pd.DataFrame, table_id: str, client: bigquery.Client) -> pd.DataFrame:
+def _align_frame(df: pd.DataFrame, schema: list[bigquery.SchemaField] | None) -> pd.DataFrame:
     """Keep table columns only; coerce DATE / TIMESTAMP / INT64 for pyarrow."""
-    try:
-        schema = client.get_table(table_id).schema
-    except Exception:
+    if schema is None:
         return df
     out = df.copy()
     names = [field.name for field in schema]
@@ -146,23 +144,6 @@ def land_and_merge(
     append_raw(df, raw_table)
     load_staging(df, stg_table, key)
     merge_from_staging(stg_table, dest_table, key, list(df.columns))
-
-
-def land_and_merge_snapshot(
-    df: pd.DataFrame,
-    *,
-    raw_table: str,
-    stg_table: str,
-    dest_table: str,
-) -> None:
-    """APPEND raw → TRUNCATE stg_* → MERGE snapshot on (channel_id, snapshot_date)."""
-    if df is None or df.empty:
-        logger.info("[land] skip empty snapshot %s", dest_table)
-        return
-    key = ("channel_id", "snapshot_date")
-    append_raw(df, raw_table)
-    load_staging(df, stg_table, key)
-    merge_snapshot(stg_table, dest_table, list(df.columns))
 
 
 def persist_checkpoint_bq(state: dict, table_id: str) -> None:

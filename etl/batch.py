@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from etl.checkpoint import (
+    blocked_channels,
     mark_videos_completed,
     mark_videos_pending,
     maybe_advance_watermark,
@@ -40,7 +41,7 @@ def ingest_channel_facts(
             key="channel_id",
         )
     if snapshot is not None and not snapshot.empty:
-        stg = tables.get("stg_snapshot") or tables["stg_channels"]
+        stg = tables["stg_snapshot"]
         load_staging(snapshot, stg, ("channel_id", "snapshot_date"))
         merge_snapshot(stg, tables["channel_daily_snapshot"], list(snapshot.columns))
 
@@ -73,40 +74,44 @@ def ingest_video_comment_batch(
     _touch_quota(checkpoint, ctx)
     save_checkpoint(checkpoint)
 
+    quota_error: QuotaExceeded | None = None
     try:
         comments = fetch_comments(comment_video_ids, ctx=ctx)
     except QuotaExceeded as err:
-        comments = pd.DataFrame(list(getattr(err, "comment_rows", None) or []))
-        comments.attrs["comment_pending"] = list(getattr(err, "comment_pending", None) or comment_video_ids)
-        comments.attrs["comment_completed"] = list(getattr(err, "comment_completed", None) or [])
-        comments.attrs["skipped_disabled"] = list(getattr(err, "skipped_disabled", None) or [])
-        comments = _prepare(comments, prepare_comments)
-        completed = list(comments.attrs.get("comment_completed") or [])
-        pending = list(comments.attrs.get("comment_pending") or comment_video_ids)
-        _merge_comments(comments, tables)
-        checkpoint = mark_videos_completed(checkpoint, completed)
-        _touch_quota(checkpoint, ctx)
-        save_checkpoint(checkpoint)
-        if merge_checkpoint_table:
-            persist_checkpoint_bq(checkpoint, merge_checkpoint_table)
-        logger.warning(
-            "quotaExceeded mid-comments; pending=%s (resume these video_ids)",
-            len(pending),
-        )
-        raise
+        quota_error = err
+        comments = _frame_from_quota_error(err, comment_video_ids)
 
+    # One durability order for both paths: MERGE comments, then move IDs to completed.
     comments = _prepare(comments, prepare_comments)
-    completed = list(comments.attrs.get("comment_completed") or [])
     _merge_comments(comments, tables)
-    checkpoint = mark_videos_completed(checkpoint, completed)
-    if remainder is None and videos is not None:
-        remainder = list(videos.attrs.get("remainder") or [])
-    checkpoint = _advance_watermarks(checkpoint, videos, comment_video_ids, remainder or [])
+    checkpoint = mark_videos_completed(checkpoint, list(comments.attrs.get("comment_completed") or []))
+
+    if quota_error is None:
+        if remainder is None and videos is not None:
+            remainder = list(videos.attrs.get("remainder") or [])
+        checkpoint = _advance_watermarks(checkpoint, videos, comment_video_ids, remainder or [])
     _touch_quota(checkpoint, ctx)
     save_checkpoint(checkpoint)
     if merge_checkpoint_table:
         persist_checkpoint_bq(checkpoint, merge_checkpoint_table)
+
+    if quota_error is not None:
+        pending = list(comments.attrs.get("comment_pending") or comment_video_ids)
+        logger.warning(
+            "quotaExceeded mid-comments; pending=%s (resume these video_ids)",
+            len(pending),
+        )
+        raise quota_error
     return comments
+
+
+def _frame_from_quota_error(err: QuotaExceeded, fallback_ids: list[str]) -> pd.DataFrame:
+    """Partial comment rows the fetch had already collected when quota ran out."""
+    frame = pd.DataFrame(list(getattr(err, "comment_rows", None) or []))
+    frame.attrs["comment_pending"] = list(getattr(err, "comment_pending", None) or fallback_ids)
+    frame.attrs["comment_completed"] = list(getattr(err, "comment_completed", None) or [])
+    frame.attrs["skipped_disabled"] = list(getattr(err, "skipped_disabled", None) or [])
+    return frame
 
 
 def _prepare(comments: pd.DataFrame, prepare_comments) -> pd.DataFrame:
@@ -142,6 +147,7 @@ def _advance_watermarks(
         return checkpoint
     pending = set(checkpoint.get("comment_pending_video_ids") or [])
     comment_set = set(comment_video_ids)
+    blocked = blocked_channels(remainder)
     for channel_id, group in videos.groupby("channel_id", sort=False):
         cid = str(channel_id)
         channel_targets = [vid for vid in group["video_id"].tolist() if vid in comment_set]
@@ -149,5 +155,5 @@ def _advance_watermarks(
             continue
         newest_val = pd.to_datetime(group["published_at"], utc=True, errors="coerce").max()
         newest = newest_val.strftime("%Y-%m-%dT%H:%M:%SZ") if pd.notna(newest_val) else ""
-        checkpoint = maybe_advance_watermark(checkpoint, cid, newest, remainder)
+        checkpoint = maybe_advance_watermark(checkpoint, cid, newest, blocked)
     return checkpoint
